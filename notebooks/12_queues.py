@@ -13,7 +13,7 @@ def _(mo):
 
     * `await queue.put(item)` waits if the queue is full (**back-pressure**), and `await queue.get()` waits if it's empty
     * `queue.task_done()` + `await queue.join()` tell you when every item has been processed
-    * workers usually loop forever, so cancel them when you're done (or on Python 3.13+ use `queue.shutdown()`)
+    * workers usually loop forever, so cancel them when you're done, or call `queue.shutdown()` (3.13+, notebook 18)
     """)
     return
 
@@ -117,16 +117,17 @@ async def _(asyncio, time):
             await asyncio.sleep(0.1)
             queue.task_done()
 
-    for _maxsize in (0, 5):
-        _queue, _waited, _sizes = asyncio.Queue(maxsize=_maxsize), [], []
-        _consumers = [asyncio.create_task(consumer(_queue)) for _ in range(2)]
-        await producer(_queue, 40, _waited, _sizes)
-        await _queue.join()
-        for _c in _consumers:
-            _c.cancel()
-        print(
-            f"maxsize={_maxsize or 'unbounded':<9} peak queue length {max(_sizes):>2}, producer spent {sum(_waited):.2f} s waiting on put()"
-        )
+    async def run(maxsize: int):
+        queue, waited, sizes = asyncio.Queue(maxsize=maxsize), [], []
+        consumers = [asyncio.create_task(consumer(queue)) for _ in range(2)]
+        await producer(queue, 40, waited, sizes)
+        await queue.join()
+        for c in consumers:
+            c.cancel()
+        print(f"maxsize={maxsize}: peak queue length {max(sizes)}, producer waited {sum(waited):.2f} s on put()")
+
+    await run(0)  # 0 means unbounded
+    await run(5)
     return
 
 

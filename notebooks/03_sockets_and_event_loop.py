@@ -131,7 +131,7 @@ def _(mo):
 
 
 @app.cell
-def _(make_server_socket, mo, selectors, socket, threading, time):
+def _(make_server_socket, selectors, socket, threading, time):
     def busy_poll_server(server: socket.socket, stop: threading.Event, result: dict) -> None:
         connections = []
         while not stop.is_set():
@@ -174,12 +174,8 @@ def _(make_server_socket, mo, selectors, socket, threading, time):
         server.close()
         return result["cpu"]
 
-    mo.md(f"""
-    | 1 s idle | CPU seconds used |
-    |---|---|
-    | busy polling | {measure_idle_cpu(busy_poll_server, 8303):.2f} |
-    | selector | {measure_idle_cpu(selector_server, 8304):.3f} |
-    """)
+    print(f"CPU used in 1 s of idling, busy polling: {measure_idle_cpu(busy_poll_server, 8303):.2f} s")
+    print(f"CPU used in 1 s of idling, selector:     {measure_idle_cpu(selector_server, 8304):.3f} s")
     return (selector_server,)
 
 

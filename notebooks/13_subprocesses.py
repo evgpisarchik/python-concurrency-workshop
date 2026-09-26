@@ -157,7 +157,7 @@ def _(asyncio, os, random):
 
 
 @app.cell
-async def _(asyncio, gzip, gzip_inputs, mo, os, time):
+async def _(asyncio, gzip, gzip_inputs, os, time):
     _start = time.perf_counter()
     for _data in gzip_inputs:
         await gzip(_data)
@@ -172,13 +172,9 @@ async def _(asyncio, gzip, gzip_inputs, mo, os, time):
     await asyncio.gather(*(gzip(_d, _semaphore) for _d in gzip_inputs))
     _limited = time.perf_counter() - _start
 
-    mo.md(f"""
-    | 32 × `gzip -9` (~{len(gzip_inputs[0]) // 1_000_000} MB each) | seconds |
-    |---|---|
-    | one at a time | {_sequential:.2f} |
-    | all 32 at once | {_all_at_once:.2f} |
-    | at most {os.cpu_count()} at once (Semaphore) | {_limited:.2f} |
-    """)
+    print(f"one at a time:   {_sequential:.2f} s")
+    print(f"all 32 at once:  {_all_at_once:.2f} s")
+    print(f"at most {os.cpu_count()} at once: {_limited:.2f} s  (Semaphore)")
     return
 
 

@@ -155,7 +155,7 @@ def _(mo):
 
 
 @app.cell
-def _(asyncio, mo, threading, time, uvloop):
+def _(asyncio, threading, time, uvloop):
     async def echo_workload(clients: int = 100, messages: int = 300) -> float:
         async def handle(reader, writer):
             while line := await reader.readline():
@@ -187,14 +187,8 @@ def _(asyncio, mo, threading, time, uvloop):
         thread.join()
         return result["t"]
 
-    _asyncio_time = run_in_thread(asyncio.run)
-    _uvloop_time = run_in_thread(uvloop.run)
-    mo.md(f"""
-    | 30,000 echo round-trips | seconds |
-    |---|---|
-    | asyncio (default loop) | {_asyncio_time:.2f} |
-    | uvloop | {_uvloop_time:.2f} |
-    """)
+    print(f"asyncio loop: {run_in_thread(asyncio.run):.2f} s")
+    print(f"uvloop:       {run_in_thread(uvloop.run):.2f} s")
     return
 
 
@@ -486,14 +480,16 @@ async def _(asyncio):
         await asyncio.sleep(0.1)
         return 0
 
+    _task = asyncio.create_task(cached_lookup("a"))
+    print("default task: done right after create_task()?", _task.done())
+    await _task
+
     _loop = asyncio.get_running_loop()
-    _previous = _loop.get_task_factory()
-    for _name, _factory in [("default", None), ("eager", asyncio.eager_task_factory)]:
-        _loop.set_task_factory(_factory)
-        _task = asyncio.create_task(cached_lookup("a"))
-        print(f"{_name:>7} task factory: done right after create_task()? {_task.done()}")
-        await _task
-    _loop.set_task_factory(_previous)
+    _loop.set_task_factory(asyncio.eager_task_factory)
+    _task = asyncio.create_task(cached_lookup("a"))
+    print("eager task:   done right after create_task()?", _task.done())
+    await _task
+    _loop.set_task_factory(None)  # back to the default
     return
 
 

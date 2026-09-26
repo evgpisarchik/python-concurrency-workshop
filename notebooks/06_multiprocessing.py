@@ -319,13 +319,11 @@ def _(multiprocessing, shared_memory, time):
             p.join()
         return shared.value, time.perf_counter() - start
 
-    _times = 100_000
-    for _name, _target in [
-        ("no lock", shared_memory.increment_many),
-        ("with lock", shared_memory.increment_many_locked),
-    ]:
-        _value, _secs = run_two_incrementers(_target, _times)
-        print(f"{_name:>9}: expected {2 * _times:,}, got {_value:,}  ({_secs:.2f} s)")
+    _value, _secs = run_two_incrementers(shared_memory.increment_many, 100_000)
+    print(f"no lock:   expected 200,000, got {_value:,}  ({_secs:.2f} s)")
+
+    _value, _secs = run_two_incrementers(shared_memory.increment_many_locked, 100_000)
+    print(f"with lock: expected 200,000, got {_value:,}  ({_secs:.2f} s)")
     return
 
 

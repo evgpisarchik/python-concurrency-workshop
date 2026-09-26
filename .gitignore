@@ -1,7 +1,6 @@
 __pycache__/
 *.py[cod]
 .venv/
-.python-version
 .pytest_cache/
 *.log
 headers.txt

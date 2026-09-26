@@ -39,6 +39,24 @@ def start_server(args: list[str], port: int) -> subprocess.Popen:
     return proc
 
 
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def run_python(version: str, args: list[str], env: dict | None = None, timeout: float = 300) -> str:
+    """Run `python <args>` on another Python build (e.g. "3.14t") through uv and return its stdout.
+
+    Only the standard library and the `workshop` package are available there, and uv downloads the
+    build on first use.
+    """
+    env = {**os.environ, "PYTHONPATH": ROOT, **(env or {})}
+    env.pop("VIRTUAL_ENV", None)  # don't let uv complain about the notebook's own venv
+    command = ["uv", "run", "--no-project", "--managed-python", "--python", version, "python", *args]
+    result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=timeout, cwd=ROOT)
+    if result.returncode != 0:
+        raise RuntimeError(f"{' '.join(command)} failed:\n{result.stderr[-2000:]}")
+    return result.stdout
+
+
 def stop_server(proc: subprocess.Popen) -> None:
     proc.terminate()
     try:

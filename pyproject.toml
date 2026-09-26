@@ -3,7 +3,7 @@ name = "python-concurrency-workshop"
 version = "0.1.0"
 description = "Hands-on marimo workshop for Python concurrency: threads, processes and asyncio."
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.14"
 dependencies = [
     "aiohttp>=3.10",
     "asgiref>=3.8",

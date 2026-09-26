@@ -55,10 +55,12 @@ async def _(asyncio):
         await asyncio.sleep(0.01)  # other tasks run here and read the same value
         _state["counter"] = value + 1  # write back a stale value
 
-    for _name, _fn in [("no await inside", increment_safely), ("await inside", increment_racy)]:
-        _state["counter"] = 0
-        await asyncio.gather(*(_fn() for _ in range(100)))
-        print(f"{_name:>16}: counter = {_state['counter']} (expected 100)")
+    await asyncio.gather(*(increment_safely() for _ in range(100)))
+    print(f"no await inside: counter = {_state['counter']} (expected 100)")
+
+    _state["counter"] = 0
+    await asyncio.gather(*(increment_racy() for _ in range(100)))
+    print(f"await inside:    counter = {_state['counter']} (expected 100)")
     return
 
 

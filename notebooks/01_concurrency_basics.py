@@ -108,13 +108,14 @@ def _(mo):
     *Listings 1.5, 1.6.* The **GIL** allows only one thread at a time to run Python bytecode. Two CPU-bound threads take
     about as long as running the work sequentially. Two processes run truly in parallel.
 
-    > On a free-threaded build (`uv run --python 3.14t marimo edit ...`) the thread version gets faster too.
+    > On the free-threaded build (3.14t) the thread version gets faster too: notebook 15 measures it. Subinterpreters
+    > (notebook 16) are a third way to run Python in parallel.
     """)
     return
 
 
 @app.cell
-def _(ProcessPoolExecutor, ThreadPoolExecutor, fib, mo, time):
+def _(ProcessPoolExecutor, ThreadPoolExecutor, fib, time):
     N = 30
     _start = time.perf_counter()
     fib(N), fib(N)
@@ -131,13 +132,9 @@ def _(ProcessPoolExecutor, ThreadPoolExecutor, fib, mo, time):
         list(_processes.map(fib, [N, N]))
         _with_processes = time.perf_counter() - _start
 
-    mo.md(f"""
-    | fib({N}) twice | seconds |
-    |---|---|
-    | sequential | {_sequential:.2f} |
-    | 2 threads | {_with_threads:.2f} ← the GIL: no speedup |
-    | 2 processes | {_with_processes:.2f} ← real parallelism |
-    """)
+    print(f"sequential:  {_sequential:.2f} s")
+    print(f"2 threads:   {_with_threads:.2f} s  <- the GIL: no speedup")
+    print(f"2 processes: {_with_processes:.2f} s  <- real parallelism")
     return
 
 

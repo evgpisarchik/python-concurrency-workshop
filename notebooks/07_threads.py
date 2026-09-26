@@ -133,36 +133,32 @@ async def _(
     def get_status_code(url: str) -> int:
         return requests.get(url).status_code
 
-    _results = {}
-
     _start = time.perf_counter()
     [get_status_code(_url) for _ in range(50)]
-    _results["sequential"] = time.perf_counter() - _start
+    print(f"sequential:                      {time.perf_counter() - _start:.2f} s")
 
     with ThreadPoolExecutor(max_workers=50) as _pool:
         _start = time.perf_counter()
         list(_pool.map(get_status_code, [_url] * 50))
-        _results["ThreadPoolExecutor(50).map"] = time.perf_counter() - _start
+        print(f"ThreadPoolExecutor(50).map:      {time.perf_counter() - _start:.2f} s")
 
     _loop = asyncio.get_running_loop()
     with ThreadPoolExecutor(max_workers=50) as _pool:
         _start = time.perf_counter()
         await asyncio.gather(*(_loop.run_in_executor(_pool, get_status_code, _url) for _ in range(50)))
-        _results["run_in_executor(own pool of 50)"] = time.perf_counter() - _start
+        print(f"run_in_executor(own pool of 50): {time.perf_counter() - _start:.2f} s")
 
     _start = time.perf_counter()
     await asyncio.gather(*(_loop.run_in_executor(None, get_status_code, _url) for _ in range(50)))
-    _results[f"run_in_executor(None): default pool of {min(32, os.cpu_count() + 4)}"] = time.perf_counter() - _start
+    print(
+        f"run_in_executor(None):           {time.perf_counter() - _start:.2f} s  (default pool of {min(32, os.cpu_count() + 4)})"
+    )
 
     _start = time.perf_counter()
     await asyncio.gather(*(asyncio.to_thread(get_status_code, _url) for _ in range(50)))
-    _results["asyncio.to_thread (default pool)"] = time.perf_counter() - _start
+    print(f"asyncio.to_thread:               {time.perf_counter() - _start:.2f} s  (default pool too)")
 
     stop_server(_server)
-    mo.md(
-        "| 50 blocking requests of 0.2 s | seconds |\n|---|---|\n"
-        + "\n".join(f"| {k} | {v:.2f} |" for k, v in _results.items())
-    )
     return
 
 
@@ -333,7 +329,7 @@ def _(mo):
 
 
 @app.cell
-def _(ThreadPoolExecutor, hash_password, mo, np, os, time):
+def _(ThreadPoolExecutor, hash_password, np, os, time):
     _passwords = [os.urandom(10) for _ in range(2_000)]
 
     _start = time.perf_counter()
@@ -355,12 +351,8 @@ def _(ThreadPoolExecutor, hash_password, mo, np, os, time):
         list(_pool.map(np.mean, _matrix))  # one row per task
         _np_threads = time.perf_counter() - _start
 
-    mo.md(f"""
-    | | 1 thread | thread pool |
-    |---|---|---|
-    | scrypt × 2,000 | {_sequential:.2f} s | {_threaded:.2f} s |
-    | numpy row means (100M values) | {_np_single:.3f} s | {_np_threads:.3f} s |
-    """)
+    print(f"scrypt x 2,000:    1 thread {_sequential:.2f} s, thread pool {_threaded:.2f} s")
+    print(f"numpy row means:   1 thread {_np_single:.3f} s, thread pool {_np_threads:.3f} s")
     return
 
 

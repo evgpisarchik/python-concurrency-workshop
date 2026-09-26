@@ -127,17 +127,15 @@ def _(mo):
 
 
 @app.cell
-async def _(bench, gate, mo, start_server, stop_server, web_button):
+async def _(bench, gate, start_server, stop_server, web_button):
     gate(web_button)
     _server = start_server(
         ["-m", "uvicorn", "workshop.web.fastapi_app:app", "--port", "8901", "--log-level", "warning"], 8901
     )
-    _rows = []
     for _endpoint in ("blocking-in-async", "blocking-in-def", "to-thread", "non-blocking"):
         _r = await bench(f"http://127.0.0.1:8901/sleep/{_endpoint}", requests=100, concurrency=100)
-        _rows.append(f"| `/sleep/{_endpoint}` | {_r['total_s']} s | {_r['req_per_s']} | {_r['p95_ms']} ms |")
+        print(f"/sleep/{_endpoint:<18} {_r['total_s']} s total, {_r['req_per_s']} req/s")
     stop_server(_server)
-    mo.md("| 100 requests, 100 concurrent | total | req/s | p95 |\n|---|---|---|---|\n" + "\n".join(_rows))
     return
 
 
@@ -160,21 +158,15 @@ def _(mo):
 
 
 @app.cell
-async def _(bench, db_button, gate, mo, start_server, stop_server):
+async def _(bench, db_button, gate, start_server, stop_server):
     gate(db_button)
     _server = start_server(
         ["-m", "uvicorn", "workshop.web.fastapi_app:app", "--port", "8901", "--log-level", "warning"], 8901
     )
-    _rows = []
-    for _endpoint, _label in [
-        ("sync-in-def", "`def` + psycopg (sync)"),
-        ("sync-in-async", "`async def` + psycopg (sync) ← pitfall"),
-        ("async", "`async def` + asyncpg"),
-    ]:
+    for _endpoint in ("sync-in-def", "sync-in-async", "async"):
         _r = await bench(f"http://127.0.0.1:8901/db/{_endpoint}", requests=2000, concurrency=100)
-        _rows.append(f"| {_label} | {_r['req_per_s']} | {_r['p95_ms']} ms | {_r['errors']} |")
+        print(f"/db/{_endpoint:<14} {_r['req_per_s']} req/s, {_r['errors']} errors")
     stop_server(_server)
-    mo.md("| 2,000 queries, 100 concurrent | req/s | p95 | errors |\n|---|---|---|---|\n" + "\n".join(_rows))
     return
 
 
@@ -197,15 +189,14 @@ def _(mo):
 
 
 @app.cell
-async def _(asyncio, bench, cpu_button, gate, mo, start_server, stop_server):
+async def _(asyncio, bench, cpu_button, gate, start_server, stop_server):
     gate(cpu_button)
-    _rows = []
     _server = start_server(
         ["-m", "uvicorn", "workshop.web.fastapi_app:app", "--port", "8901", "--log-level", "warning"], 8901
     )
     for _endpoint in ("inline", "thread", "process"):
         _r = await bench(f"http://127.0.0.1:8901/cpu/{_endpoint}", requests=32, concurrency=8)
-        _rows.append(f"| `/cpu/{_endpoint}`, 1 worker | {_r['total_s']} s | {_r['req_per_s']} |")
+        print(f"/cpu/{_endpoint:<8} 1 worker:  {_r['total_s']} s total")
     stop_server(_server)
 
     _server = start_server(
@@ -214,9 +205,8 @@ async def _(asyncio, bench, cpu_button, gate, mo, start_server, stop_server):
     )
     await asyncio.sleep(2)  # let all 4 workers finish starting
     _r = await bench("http://127.0.0.1:8902/cpu/inline", requests=32, concurrency=8)
-    _rows.append(f"| `/cpu/inline`, `--workers 4` | {_r['total_s']} s | {_r['req_per_s']} |")
+    print(f"/cpu/inline   4 workers: {_r['total_s']} s total")
     stop_server(_server)
-    mo.md("| 32 CPU-heavy requests, 8 concurrent | total | req/s |\n|---|---|---|\n" + "\n".join(_rows))
     return
 
 
