@@ -7,3 +7,4 @@ __pycache__/
 headers.txt
 data/*
 !data/.gitkeep
+__marimo__/

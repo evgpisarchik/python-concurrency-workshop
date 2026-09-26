@@ -1,6 +1,5 @@
 -- Runs once, on the first start of the container.
--- The `products` schema and data are created by chapter 5 scripts
--- (02_create_schema, 04_insert_random_brands, 05_insert_random_products_and_skus).
+-- The `products` schema and data are created by: uv run python -m workshop.db_setup
 CREATE DATABASE products;
 CREATE DATABASE cart;
 CREATE DATABASE favorites;

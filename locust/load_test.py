@@ -3,7 +3,7 @@
 A single locust process is limited by one CPU core (it's gevent-based), so to
 generate heavy load, run several workers. This is multiprocessing in practice.
 
-Run: uv run --group load python locust/load_test.py locust/work.py [workers]
+Run: uv run --group load python locust/load_test.py locust/fastapi_app.py [workers]
 UI:  http://localhost:8089
 """
 
@@ -12,7 +12,7 @@ import subprocess
 import sys
 import time
 
-LOCUSTFILE = sys.argv[1] if len(sys.argv) > 1 else "locust/work.py"
+LOCUSTFILE = sys.argv[1] if len(sys.argv) > 1 else "locust/fastapi_app.py"
 NUM_WORKERS = int(sys.argv[2]) if len(sys.argv) > 2 else max((os.cpu_count() or 2) // 2, 1)
 
 

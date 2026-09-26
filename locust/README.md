@@ -1,31 +1,16 @@
-# Load testing with Locust
+# Load testing with Locust (optional)
 
-Install the optional group once:
+Notebook 9 benchmarks every endpoint with `workshop/bench.py`. Use Locust when you want a live UI with RPS and
+latency charts while you change the load.
 
 ```bash
 uv sync --group load
+uv run uvicorn workshop.web.fastapi_app:app --port 8901            # add --workers 4 to compare
+
+ENDPOINT=/sleep/blocking-in-async uv run locust -f locust/fastapi_app.py
+# several load-generator processes (one locust process is limited to one CPU core):
+ENDPOINT=/db/async uv run python locust/load_test.py locust/fastapi_app.py 4
 ```
 
-Start the server you want to test, then:
-
-```bash
-# one process (simple)
-uv run locust -f locust/work.py
-# several processes (Linux/macOS/WSL)
-uv run locust -f locust/work.py --processes 4
-# master + workers, works everywhere
-uv run python locust/load_test.py locust/work.py 4
-# headless: 500 users, spawn 50/s, 30 s
-uv run locust -f locust/work.py --headless -u 500 -r 50 -t 30s
-```
-
-Open http://localhost:8089 to start a test and watch RPS and latency.
-
-| Locustfile | Target | Server examples |
-|---|---|---|
-| `time.py` | `GET :8080/time` | ch09 `01_aiohttp_time_endpoint` |
-| `brands.py` | `GET :8000/brands` | ch09 `05_flask_brands_wsgi` (gunicorn), `08_starlette_brands` (uvicorn) |
-| `work.py` | `GET :8080/work` | every ch15 FastAPI app |
-
-For a quick comparison without Locust, use the asyncio benchmark in chapter 15:
-`uv run python -m workshop.ch15_fastapi_sync_vs_async.bench http://127.0.0.1:8080/work -n 2000 -c 100`
+Open http://localhost:8089. Endpoints: `/sleep/{blocking-in-async,blocking-in-def,to-thread,non-blocking}`,
+`/db/{sync-in-def,sync-in-async,async}`, `/cpu/{inline,thread,process}`.

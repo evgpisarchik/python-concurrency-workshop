@@ -10,7 +10,7 @@ from pathlib import Path
 DATA_DIR = Path(__file__).resolve().parents[2] / "data"
 
 PG_HOST = os.getenv("PGHOST", "127.0.0.1")
-PG_PORT = int(os.getenv("PGPORT", "5432"))
+PG_PORT = int(os.getenv("PGPORT", "55432"))
 PG_USER = os.getenv("PGUSER", "postgres")
 PG_PASSWORD = os.getenv("PGPASSWORD", "password")
 
