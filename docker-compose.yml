@@ -1,0 +1,14 @@
+# Postgres used by chapters 5, 6, 8, 9, 10 and 15.
+#   docker compose up -d
+# Port 5432 taken? Use another one for both compose and the examples:
+#   export PGPORT=55432 && docker compose up -d
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+    ports:
+      - "127.0.0.1:${PGPORT:-5432}:5432"
+    volumes:
+      - ./docker/initdb:/docker-entrypoint-initdb.d:ro
