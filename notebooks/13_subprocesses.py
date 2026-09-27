@@ -22,23 +22,13 @@ def _():
     import os
     import random
     import sys
-    import time
+    from asyncio.subprocess import DEVNULL, PIPE
 
     import marimo as mo
 
-    from workshop.children import ASK_USERNAME, ECHO_SLOW, LOTS_OF_OUTPUT
+    from workshop.common import timed
 
-    return (
-        ASK_USERNAME,
-        ECHO_SLOW,
-        LOTS_OF_OUTPUT,
-        asyncio,
-        mo,
-        os,
-        random,
-        sys,
-        time,
-    )
+    return DEVNULL, PIPE, asyncio, mo, os, random, sys, timed
 
 
 @app.cell(hide_code=True)
@@ -53,18 +43,18 @@ def _(mo):
 
 
 @app.cell
-async def _(asyncio):
-    _process = await asyncio.create_subprocess_exec("ls", "-l", stdout=asyncio.subprocess.DEVNULL)
-    print(f"ls: pid {_process.pid}, exit code {await _process.wait()}")
+async def _(DEVNULL, asyncio):
+    _process = await asyncio.create_subprocess_exec("ls", "-l", stdout=DEVNULL)
+    print("ls exited with", await _process.wait())
 
     _process = await asyncio.create_subprocess_exec("sleep", "3")
     try:
-        _ = await asyncio.wait_for(_process.wait(), timeout=1)
+        await asyncio.wait_for(_process.wait(), timeout=1)
     except TimeoutError:
         _process.terminate()
         print(
-            f"sleep 3 timed out after 1 s; terminated, exit code {await _process.wait()} (negative = killed by signal)"
-        )
+            "sleep 3 timed out after 1 s; terminated, exit code", await _process.wait()
+        )  # negative: killed by a signal
     return
 
 
@@ -73,21 +63,20 @@ def _(mo):
     mo.md(r"""
     ## Stream output while it runs
 
-    *Listing 13.3.* Read `stdout` line by line **concurrently** with waiting for the exit code: live build logs, `tail -f`, and so on.
+    *Listing 13.3.* `process.stdout` is a `StreamReader`, so you can read it line by line **while the program runs**:
+    live build logs, `tail -f`, and so on.
     """)
     return
 
 
 @app.cell
-async def _(asyncio, sys):
-    async def write_output(prefix: str, stdout: asyncio.StreamReader):
-        while line := await stdout.readline():
-            print(f"[{prefix}] {line.decode().rstrip()}")
-
-    _program = [sys.executable, "-u", "-c", "import time\nfor i in range(4):\n    print(f'step {i}'); time.sleep(0.3)"]
-    _process = await asyncio.create_subprocess_exec(*_program, stdout=asyncio.subprocess.PIPE)
-    _code, _ = await asyncio.gather(_process.wait(), write_output("child", _process.stdout))
-    print(f"exit code {_code}")
+async def _(PIPE, asyncio):
+    _process = await asyncio.create_subprocess_exec(
+        "sh", "-c", "for i in 1 2 3; do echo step $i; sleep 0.3; done", stdout=PIPE
+    )
+    async for _line in _process.stdout:
+        print("child says:", _line.decode().strip())
+    print("exit code", await _process.wait())
     return
 
 
@@ -96,26 +85,29 @@ def _(mo):
     mo.md(r"""
     ## Pitfall: an unread pipe leads to deadlock
 
-    *Listings 13.4–13.6.* The child writes ~14 MB. The OS pipe buffer holds ~64 KB, so once it's full the child blocks on
-    `write()`. We block on `wait()` for the child to exit, so neither side can make progress.
-    **Always read the pipes you open**: stream them, or use `communicate()`, which reads everything safely (but buffers it all in memory).
+    *Listings 13.4–13.6.* `workshop/children/lots_of_output.py` writes ~14 MB. The OS pipe buffer holds ~64 KB, so once
+    it's full the child blocks on `write()`. We block on `wait()` for the child to exit, so neither side can make progress.
+    **Always read the pipes you open**: stream them, or use `communicate()`, which reads everything safely (but buffers
+    it all in memory).
     """)
     return
 
 
 @app.cell
-async def _(LOTS_OF_OUTPUT, asyncio, sys):
-    _process = await asyncio.create_subprocess_exec(sys.executable, str(LOTS_OF_OUTPUT), stdout=asyncio.subprocess.PIPE)
+async def _(PIPE, asyncio, sys):
+    _child = [sys.executable, "-m", "workshop.children.lots_of_output"]
+
+    _process = await asyncio.create_subprocess_exec(*_child, stdout=PIPE)
     try:
         await asyncio.wait_for(_process.wait(), timeout=2)
     except TimeoutError:
         print("wait() never returned: the child is stuck writing to a full pipe that nobody reads")
         _process.kill()
-        await _process.communicate()  # drain the pipe, otherwise even cleanup would hang
+        await _process.communicate()
 
-    _process = await asyncio.create_subprocess_exec(sys.executable, str(LOTS_OF_OUTPUT), stdout=asyncio.subprocess.PIPE)
+    _process = await asyncio.create_subprocess_exec(*_child, stdout=PIPE)
     _stdout, _ = await _process.communicate()
-    print(f"communicate(): read {len(_stdout):,} bytes, exit code {_process.returncode}")
+    print(f"communicate() read {len(_stdout):,} bytes")
     return
 
 
@@ -126,55 +118,31 @@ def _(mo):
 
     *Listings 13.7, 13.8.* Compress 32 inputs with `gzip -9`, a CPU-heavy external tool. Running them concurrently uses
     every core. Starting **all** of them at once can overload the machine (and hit process/file limits), so cap them with
-    `Semaphore(cpu_count)`.
+    a `Semaphore`.
     """)
     return
 
 
 @app.cell
-def _(asyncio, os, random):
-    _words = (
-        open("/usr/share/dict/words").read().split()
-        if os.path.exists("/usr/share/dict/words")
-        else ["asyncio", "thread", "process", "event", "loop"]
-    )
-    gzip_inputs = [" ".join(random.choices(_words, k=400_000)).encode() for _ in range(32)]
+async def _(PIPE, asyncio, os, random, timed):
+    _inputs = [random.randbytes(2_000_000) for _ in range(32)]
 
-    async def gzip(data: bytes, semaphore: asyncio.Semaphore | None = None) -> bytes:
-        async def run():
-            process = await asyncio.create_subprocess_exec(
-                "gzip", "-9", "-c", stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE
-            )
+    async def gzip(data: bytes, limit: asyncio.Semaphore) -> bytes:
+        async with limit:
+            process = await asyncio.create_subprocess_exec("gzip", "-9", "-c", stdin=PIPE, stdout=PIPE)
             compressed, _ = await process.communicate(data)
             return compressed
 
-        if semaphore is None:
-            return await run()
-        async with semaphore:
-            return await run()
+    async def compress_all(at_once: int):
+        limit = asyncio.Semaphore(at_once)
+        await asyncio.gather(*(gzip(data, limit) for data in _inputs))
 
-    return gzip, gzip_inputs
-
-
-@app.cell
-async def _(asyncio, gzip, gzip_inputs, os, time):
-    _start = time.perf_counter()
-    for _data in gzip_inputs:
-        await gzip(_data)
-    _sequential = time.perf_counter() - _start
-
-    _start = time.perf_counter()
-    await asyncio.gather(*(gzip(_d) for _d in gzip_inputs))
-    _all_at_once = time.perf_counter() - _start
-
-    _semaphore = asyncio.Semaphore(os.cpu_count())
-    _start = time.perf_counter()
-    await asyncio.gather(*(gzip(_d, _semaphore) for _d in gzip_inputs))
-    _limited = time.perf_counter() - _start
-
-    print(f"one at a time:   {_sequential:.2f} s")
-    print(f"all 32 at once:  {_all_at_once:.2f} s")
-    print(f"at most {os.cpu_count()} at once: {_limited:.2f} s  (Semaphore)")
+    with timed("one at a time"):
+        await compress_all(1)
+    with timed(f"at most {os.cpu_count()} at once"):
+        await compress_all(os.cpu_count())
+    with timed("all 32 at once"):
+        await compress_all(32)
     return
 
 
@@ -189,9 +157,9 @@ def _(mo):
 
 
 @app.cell
-async def _(ASK_USERNAME, asyncio, sys):
+async def _(PIPE, asyncio, sys):
     _process = await asyncio.create_subprocess_exec(
-        sys.executable, str(ASK_USERNAME), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE
+        sys.executable, "-m", "workshop.children.ask_username", stdin=PIPE, stdout=PIPE
     )
     _stdout, _ = await _process.communicate(b"Zoot\n")
     print(_stdout.decode())
@@ -203,7 +171,8 @@ def _(mo):
     mo.md(r"""
     ## Interactive programs: wait for the prompt
 
-    *Listings 13.11–13.14.* The child prompts `Enter text to echo: `, then prints the input 0–9 times, slowly (unbuffered, `-u`, so output arrives bit by bit like a real interactive tool).
+    *Listings 13.11–13.14.* `workshop/children/echo_slow.py` prompts `Enter text to echo: `, then prints the input 0–9
+    times, slowly, like a real interactive tool.
 
     **Naive:** read once, write the next input. A single `read()` returns whatever happens to be available, so our inputs get
     out of step with the prompts.
@@ -214,49 +183,56 @@ def _(mo):
 
 
 @app.cell
-async def _(ECHO_SLOW, asyncio, random, sys):
-    async def naive(texts: list[str]) -> list[bytes]:
-        process = await asyncio.create_subprocess_exec(
-            sys.executable, "-u", str(ECHO_SLOW), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE
-        )
-        seen = []
-        for text in texts:
-            seen.append(await process.stdout.read(2048))  # whatever is there right now
-            process.stdin.write(text.encode())
-            await process.stdin.drain()
-        await process.communicate()
-        return seen
+def _(PIPE, asyncio, sys):
+    class EchoSlowClient:
+        """Drives workshop/children/echo_slow.py through its stdin and stdout."""
 
-    async def prompt_driven(texts: list[str]) -> list[bytes]:
-        process = await asyncio.create_subprocess_exec(
-            sys.executable, "-u", str(ECHO_SLOW), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE
-        )
-        ready, seen = asyncio.Event(), []
+        PROMPT = b"Enter text to echo: "
 
-        async def output_consumer():
-            while data := await process.stdout.read(1024):
-                seen.append(data)
-                if data.endswith(b"Enter text to echo: "):
-                    ready.set()
+        def __init__(self):
+            self.seen = []  # every chunk of output, in order
+            self._process = None
 
-        async def input_writer():
+        async def send_naively(self, texts: list[str]) -> list[bytes]:
+            await self._start()
             for text in texts:
-                await ready.wait()
-                ready.clear()
-                process.stdin.write(text.encode())
-                await process.stdin.drain()
+                self.seen.append(await self._process.stdout.read(1024))  # whatever is there right now
+                self._process.stdin.write(text.encode())
+            await self._process.communicate()
+            return self.seen
 
-        await asyncio.gather(output_consumer(), input_writer(), process.wait())
-        return seen
+        async def send_on_prompt(self, texts: list[str]) -> list[bytes]:
+            await self._start()
+            prompt_shown = asyncio.Event()
 
-    random.seed(7)
+            async def read_output():
+                while data := await self._process.stdout.read(1024):
+                    self.seen.append(data)
+                    if data.endswith(self.PROMPT):
+                        prompt_shown.set()
+
+            async def write_input():
+                for text in texts:
+                    await prompt_shown.wait()
+                    prompt_shown.clear()
+                    self._process.stdin.write(text.encode())
+
+            await asyncio.gather(read_output(), write_input())
+            return self.seen
+
+        async def _start(self):
+            self._process = await asyncio.create_subprocess_exec(
+                sys.executable, "-u", "-m", "workshop.children.echo_slow", stdin=PIPE, stdout=PIPE
+            )
+
+    return (EchoSlowClient,)
+
+
+@app.cell
+async def _(EchoSlowClient):
     _texts = ["one\n", "two\n", "three\n", "quit\n"]
-    print("--- naive: prompts and inputs out of step")
-    for _chunk in await asyncio.wait_for(naive(_texts), 30):
-        print("  ", _chunk)
-    print("--- prompt-driven: every input answers a prompt")
-    for _chunk in await asyncio.wait_for(prompt_driven(_texts), 30):
-        print("  ", _chunk)
+    print("naive: prompts and inputs out of step", *await EchoSlowClient().send_naively(_texts), sep="\n    ")
+    print("prompt-driven: every input answers a prompt", *await EchoSlowClient().send_on_prompt(_texts), sep="\n    ")
     return
 
 

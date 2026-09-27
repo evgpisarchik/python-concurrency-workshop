@@ -1,14 +1,23 @@
-"""Listing 2.16: decorator that prints how long a coroutine took.
+"""Timing helpers.
 
-Wrap a coroutine function with @async_timed() to see when it starts and how long
-it runs. Comparing timings of nested coroutines is the fastest way to tell
-whether your code actually runs concurrently.
+`timed(label)` prints how long a block took: `with timed("2 threads"): ...` (works around `await` too).
+
+Listing 2.16, `@async_timed()`, prints when a coroutine starts and how long it runs. Comparing timings of nested
+coroutines is the fastest way to tell whether your code actually runs concurrently.
 """
 
 import functools
 import time
 from collections.abc import Awaitable, Callable
+from contextlib import contextmanager
 from typing import Any
+
+
+@contextmanager
+def timed(label: str):
+    start = time.perf_counter()
+    yield
+    print(f"{label}: {time.perf_counter() - start:.2f} s")
 
 
 def async_timed():

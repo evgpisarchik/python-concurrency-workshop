@@ -9,60 +9,64 @@ def _(mo):
     mo.md(r"""
     # 4 · Concurrent web requests: gather, as_completed, wait
 
-    All requests go to a **local test server** (`workshop/testserver.py`) with a `/delay?seconds=` endpoint, so timings
-    are predictable and no public site gets hammered. Each cell starts the server with `async with serve()` and stops it at the end.
+    All requests go to a **local test server** (`workshop/testserver.py`) whose `/delay?seconds=` endpoint answers after
+    that many seconds, so timings are predictable and no public site gets hammered. `DelayApi(session).get(seconds)`
+    requests it and returns the delay it got back.
     """)
     return
 
 
 @app.cell
-def _():
+async def _():
     import asyncio
-    import logging
-    import time
 
     import aiohttp
     import marimo as mo
 
-    from workshop.common import async_timed
-    from workshop.testserver import serve
+    from workshop.common import timed
+    from workshop.testserver import start
 
-    return aiohttp, async_timed, asyncio, logging, mo, serve, time
+    base_url = await start()  # runs for the rest of the notebook
 
+    class DelayApi:
+        """Client for the test server: `get(seconds)` answers after that many seconds."""
 
-@app.cell
-def _(aiohttp, async_timed):
-    @async_timed()
-    async def fetch_status(session: aiohttp.ClientSession, url: str) -> int:
-        async with session.get(url) as response:
-            return response.status
+        def __init__(self, session: aiohttp.ClientSession):
+            self.session = session
 
-    return (fetch_status,)
+        async def get(self, seconds: float, **request_options) -> float:
+            async with self.session.get(f"{base_url}/delay?seconds={seconds}", **request_options) as response:
+                return (await response.json())["slept"]
+
+        async def get_invalid_url(self):
+            async with self.session.get("python://not-a-valid-url"):
+                pass
+
+    return DelayApi, aiohttp, asyncio, mo, timed
 
 
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## One request, one shared session, timeouts
+    ## One shared session, timeouts
 
     *Listings 4.1–4.3.* `ClientSession` holds the connection pool, so create **one per application** and reuse it. It's an
-    *async context manager* (`async with`, via `__aenter__`/`__aexit__`), because opening and closing it needs I/O.
-    Always set timeouts: a session-wide default, overridden per request when needed.
+    *async context manager* (`async with`), because opening and closing it needs I/O. Always set timeouts: a
+    session-wide default, overridden per request when needed.
     """)
     return
 
 
 @app.cell
-async def _(aiohttp, fetch_status, serve):
-    async with serve() as _base:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=1, connect=0.1)) as _session:
-            print(await fetch_status(_session, f"{_base}/delay?seconds=0.1"))
-            try:
-                _short = aiohttp.ClientTimeout(total=0.2)  # overrides the session default for this request
-                async with _session.get(f"{_base}/delay?seconds=0.5", timeout=_short) as _response:
-                    await _response.read()
-            except TimeoutError:
-                print("per-request timeout of 0.2 s fired")
+async def _(DelayApi, aiohttp):
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=1)) as _session:
+        _api = DelayApi(_session)
+        print("slept", await _api.get(0.1))
+
+        try:
+            await _api.get(0.5, timeout=aiohttp.ClientTimeout(total=0.2))  # overrides the session default
+        except TimeoutError:
+            print("the per-request timeout of 0.2 s fired")
     return
 
 
@@ -78,18 +82,15 @@ def _(mo):
 
 
 @app.cell
-async def _(aiohttp, asyncio, fetch_status, serve, time):
-    async with serve() as _base, aiohttp.ClientSession() as _session:
-        _url = f"{_base}/delay?seconds=1"
+async def _(DelayApi, aiohttp, asyncio, timed):
+    async with aiohttp.ClientSession() as _session:
+        _api = DelayApi(_session)
+        with timed("await inside the comprehension"):
+            [await asyncio.create_task(_api.get(1)) for _ in range(3)]
 
-        _start = time.perf_counter()
-        [await asyncio.create_task(fetch_status(_session, _url)) for _ in range(3)]
-        print(f"await inside the comprehension: {time.perf_counter() - _start:.2f} s")
-
-        _start = time.perf_counter()
-        _tasks = [asyncio.create_task(fetch_status(_session, _url)) for _ in range(3)]
-        [await _t for _t in _tasks]
-        print(f"create all, then await:         {time.perf_counter() - _start:.2f} s")
+        with timed("create all, then await"):
+            _tasks = [asyncio.create_task(_api.get(1)) for _ in range(3)]
+            [await _task for _task in _tasks]
     return
 
 
@@ -98,36 +99,38 @@ def _(mo):
     mo.md(r"""
     ## `gather`: fan out, collect everything, in order
 
-    *Listings 4.6, 4.7.* 500 requests that each take 0.5 s. A `ClientSession` opens at most **100 connections** by default
-    (`TCPConnector(limit=100)`), so they run in 5 waves of about 0.5 s each. Raising the limit lets them overlap (the rest of the time is opening 500 connections, with the server sharing this same event loop). Results come back in **input
-    order**, not completion order.
+    *Listings 4.6, 4.7.* `gather` runs all awaitables concurrently and returns the results in **input order**, not
+    completion order:
     """)
     return
 
 
 @app.cell
-async def _(aiohttp, asyncio, serve, time):
-    async def get_many(session: aiohttp.ClientSession, url: str, n: int) -> list[int]:
-        async def one():
-            async with session.get(url) as response:
-                return response.status
+async def _(asyncio):
+    print(await asyncio.gather(asyncio.sleep(1, result="slow"), asyncio.sleep(0.1, result="fast")))
+    return
 
-        return await asyncio.gather(*(one() for _ in range(n)))
 
-    async with serve() as _base:
-        for _limit in (100, 500):
-            async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=_limit)) as _s:
-                _start = time.perf_counter()
-                await get_many(_s, f"{_base}/delay?seconds=0.5", 500)
-                print(f"500 requests, connection limit {_limit}: {time.perf_counter() - _start:.2f} s")
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    500 requests that each take 0.5 s. A `ClientSession` opens at most **100 connections** by default
+    (`TCPConnector(limit=100)`), so they run in 5 waves. Raising the limit lets them all overlap.
+    """)
+    return
 
-    async with serve() as _base, aiohttp.ClientSession() as _session:
 
-        async def slept(seconds):
-            async with _session.get(f"{_base}/delay?seconds={seconds}") as response:
-                return (await response.json())["slept"]
+@app.cell
+async def _(DelayApi, aiohttp, asyncio, timed):
+    async with aiohttp.ClientSession() as _session:
+        _api = DelayApi(_session)
+        with timed("500 requests, 100 connections (default)"):
+            await asyncio.gather(*(_api.get(0.5) for _ in range(500)))
 
-        print("order of results:", await asyncio.gather(slept(1), slept(0.1), slept(0.5)))
+    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=500)) as _session:
+        _api = DelayApi(_session)
+        with timed("500 requests, 500 connections"):
+            await asyncio.gather(*(_api.get(0.5) for _ in range(500)))
     return
 
 
@@ -143,17 +146,15 @@ def _(mo):
 
 
 @app.cell
-async def _(aiohttp, asyncio, fetch_status, serve):
-    async with serve() as _base, aiohttp.ClientSession() as _session:
-        _urls = [f"{_base}/delay?seconds=0.1", "python://not-a-valid-url"]
+async def _(DelayApi, aiohttp, asyncio):
+    async with aiohttp.ClientSession() as _session:
+        _api = DelayApi(_session)
         try:
-            await asyncio.gather(*(fetch_status(_session, _u) for _u in _urls))
-        except Exception as error:
-            print(f"default: gather raised {error!r}")
+            await asyncio.gather(_api.get(0.1), _api.get_invalid_url())
+        except aiohttp.ClientError as _error:
+            print("gather raised", repr(_error))
 
-        _results = await asyncio.gather(*(fetch_status(_session, _u) for _u in _urls), return_exceptions=True)
-        print("successes:", [_r for _r in _results if not isinstance(_r, Exception)])
-        print("failures: ", [_r for _r in _results if isinstance(_r, Exception)])
+        print(await asyncio.gather(_api.get(0.1), _api.get_invalid_url(), return_exceptions=True))
     return
 
 
@@ -162,29 +163,27 @@ def _(mo):
     mo.md(r"""
     ## `as_completed`: handle each result as soon as it arrives
 
-    *Listings 4.8, 4.9.* Useful for progress bars and streaming partial results. With `timeout=` whatever isn't done in time
-    raises `TimeoutError`, but that work **keeps running in the background**, so cancel it yourself.
+    *Listings 4.8, 4.9.* Useful for progress bars and streaming partial results. With `timeout=`, whatever isn't done in
+    time raises `TimeoutError`, but that work **keeps running in the background**, so cancel it yourself.
     """)
     return
 
 
 @app.cell
-async def _(aiohttp, asyncio, fetch_status, serve, time):
-    async with serve() as _base, aiohttp.ClientSession() as _session:
-        _start = time.perf_counter()
-        for _next in asyncio.as_completed([fetch_status(_session, f"{_base}/delay?seconds={s}") for s in (2, 0.5, 1)]):
-            await _next
-            print(f"got a result at {time.perf_counter() - _start:.2f} s")
+async def _(DelayApi, aiohttp, asyncio):
+    async with aiohttp.ClientSession() as _session:
+        _api = DelayApi(_session)
+        for _next_done in asyncio.as_completed([_api.get(1), _api.get(0.2), _api.get(0.5)]):
+            print("got", await _next_done)
 
-        _tasks = [asyncio.create_task(fetch_status(_session, f"{_base}/delay?seconds={s}")) for s in (0.5, 5, 5)]
-        for _next in asyncio.as_completed(_tasks, timeout=1):
-            try:
-                await _next
-            except TimeoutError:
-                print("timed out waiting")
-        print(f"still running in the background: {sum(not _t.done() for _t in _tasks)} task(s), cancelling them")
-        for _t in _tasks:
-            _t.cancel()
+        _tasks = [asyncio.create_task(_api.get(0.5)), asyncio.create_task(_api.get(5))]
+        try:
+            for _next_done in asyncio.as_completed(_tasks, timeout=1):
+                print("got", await _next_done)
+        except TimeoutError:
+            print("timed out: cancelling what's still running")
+            for _task in _tasks:
+                _task.cancel()
     return
 
 
@@ -193,53 +192,36 @@ def _(mo):
     mo.md(r"""
     ## `wait`: done/pending sets for fine-grained control
 
-    *Listings 4.10–4.16.* `asyncio.wait(tasks, return_when=..., timeout=...)` returns `(done, pending)` sets of **Tasks**
-    (bare coroutines aren't accepted since Python 3.11). Nothing is raised or cancelled for you:
-    inspect `task.exception()`, and cancel what's pending.
+    *Listings 4.10–4.16.* `asyncio.wait(tasks, return_when=..., timeout=...)` returns `(done, pending)` sets of **Tasks**.
+    Nothing is raised or cancelled for you: read `task.result()` / `task.exception()`, and cancel what's pending.
     """)
     return
 
 
 @app.cell
-async def _(aiohttp, asyncio, fetch_status, logging, serve):
-    async with serve() as _base, aiohttp.ClientSession() as _session:
+async def _(DelayApi, aiohttp, asyncio):
+    async with aiohttp.ClientSession() as _session:
+        _api = DelayApi(_session)
+        # The fastest of three replicas wins
+        _replicas = [asyncio.create_task(_api.get(_s)) for _s in (1, 0.2, 2)]
+        _done, _pending = await asyncio.wait(_replicas, return_when=asyncio.FIRST_COMPLETED)
+        print("FIRST_COMPLETED: got", _done.pop().result(), "| cancelling", len(_pending))
+        for _task in _pending:
+            _task.cancel()
 
-        def _fetch(seconds):
-            return asyncio.create_task(fetch_status(_session, f"{_base}/delay?seconds={seconds}"))
+        # All or nothing: stop at the first failure
+        _batch = [asyncio.create_task(_api.get_invalid_url()), asyncio.create_task(_api.get(3))]
+        _done, _pending = await asyncio.wait(_batch, return_when=asyncio.FIRST_EXCEPTION)
+        print("FIRST_EXCEPTION:", repr(_done.pop().exception()), "| cancelling", len(_pending))
+        for _task in _pending:
+            _task.cancel()
 
-        print("--- ALL_COMPLETED + per-task exception handling (4.10, 4.11)")
-        _done, _pending = await asyncio.wait([_fetch(0.1), asyncio.create_task(fetch_status(_session, "python://bad"))])
-        for _t in _done:
-            if _t.exception() is None:
-                print("  result:", _t.result())
-            else:
-                logging.error("  request failed: %r", _t.exception())
-
-        print("--- FIRST_EXCEPTION: all-or-nothing batch (4.12)")
-        _tasks = [asyncio.create_task(fetch_status(_session, "python://bad")), _fetch(3), _fetch(3)]
-        _done, _pending = await asyncio.wait(_tasks, return_when=asyncio.FIRST_EXCEPTION)
-        print(f"  done={len(_done)} pending={len(_pending)} -> cancelling the rest")
-        for _t in _pending:
-            _t.cancel()
-
-        print("--- FIRST_COMPLETED: fastest replica wins (4.13)")
-        _done, _pending = await asyncio.wait([_fetch(1), _fetch(0.2), _fetch(2)], return_when=asyncio.FIRST_COMPLETED)
-        print(f"  done={len(_done)} pending={len(_pending)}")
-        for _t in _pending:
-            _t.cancel()
-
-        print("--- FIRST_COMPLETED in a loop: results as they arrive, keeping the Task objects (4.14)")
-        _pending = {_fetch(s) for s in (0.3, 0.1, 0.2)}
-        while _pending:
-            _done, _pending = await asyncio.wait(_pending, return_when=asyncio.FIRST_COMPLETED)
-            print(f"  {len(_done)} finished, {len(_pending)} left")
-
-        print("--- timeout: a hard deadline, then drop only the slow optional call (4.15, 4.16)")
-        _api_a, _api_b = _fetch(0.1), _fetch(2)
-        _done, _pending = await asyncio.wait([_api_a, _api_b], timeout=1)
-        if _api_b in _pending:
-            print("  API B too slow, cancelling it; API A returned", _api_a.result())
-            _api_b.cancel()
+        # A hard deadline: keep what's done, drop the slow optional call
+        _api_a = asyncio.create_task(_api.get(0.1))
+        _api_b = asyncio.create_task(_api.get(2))
+        await asyncio.wait([_api_a, _api_b], timeout=1)
+        print("timeout: API A returned", _api_a.result(), "| API B still running:", not _api_b.done())
+        _api_b.cancel()
     return
 
 

@@ -10,7 +10,7 @@ def _(mo):
     # 9 · Web applications: WSGI vs ASGI, sync vs async endpoints
 
     This notebook starts real servers as subprocesses (`workshop/web/`) and load-tests them with a small asyncio
-    benchmark (`workshop/bench.py`), so you can **measure** each concurrency model instead of taking it on faith.
+    load generator (`workshop/bench.py`), so you can **measure** each concurrency model instead of taking it on faith.
     """)
     return
 
@@ -18,31 +18,17 @@ def _(mo):
 @app.cell
 def _():
     import asyncio
-    import threading
     import time
-    from functools import partial
 
     import aiohttp
     import marimo as mo
     from asgiref.sync import async_to_sync, sync_to_async
 
     from workshop.bench import bench
-    from workshop.nb import gate, start_server, stop_server
+    from workshop.common import timed
+    from workshop.nb import gate, start_server
 
-    return (
-        aiohttp,
-        async_to_sync,
-        asyncio,
-        bench,
-        gate,
-        mo,
-        partial,
-        start_server,
-        stop_server,
-        sync_to_async,
-        threading,
-        time,
-    )
+    return aiohttp, async_to_sync, asyncio, bench, gate, mo, start_server, sync_to_async, time, timed
 
 
 @app.cell(hide_code=True)
@@ -81,31 +67,39 @@ def _(mo):
 
 @app.cell
 def _(mo):
-    web_button = mo.ui.run_button(label="Start the FastAPI server and run the I/O benchmarks")
+    web_button = mo.ui.run_button(label="Start the servers and run the demos")
     web_button
     return (web_button,)
+
+
+@app.cell
+def _(gate, start_server, web_button):
+    gate(web_button, "the web demos")
+    start_server(["-m", "uvicorn", "workshop.web.fastapi_app:app", "--port", "8901", "--log-level", "warning"], 8901)
+    api = "http://127.0.0.1:8901"
+    return (api,)
 
 
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
     ## Where does each endpoint run?
+
+    Both endpoints return the name of the thread that ran them. We call each one 5 times concurrently:
     """)
     return
 
 
 @app.cell
-async def _(aiohttp, asyncio, gate, start_server, stop_server, web_button):
-    gate(web_button)
-    _server = start_server(
-        ["-m", "uvicorn", "workshop.web.fastapi_app:app", "--port", "8901", "--log-level", "warning"], 8901
-    )
+async def _(aiohttp, api, asyncio):
     async with aiohttp.ClientSession() as _session:
-        for _path in ("/info", "/info-async"):
-            _replies = await asyncio.gather(*(_session.get(f"http://127.0.0.1:8901{_path}") for _ in range(5)))
-            _threads = sorted({(await _r.json())["thread"] for _r in _replies})
-            print(f"{_path:<12} ran on: {_threads}")
-    stop_server(_server)
+
+        async def thread_name(path: str) -> str:
+            async with _session.get(f"{api}{path}") as response:
+                return (await response.json())["thread"]
+
+        print("def endpoint ran on:      ", set(await asyncio.gather(*(thread_name("/info") for _ in range(5)))))
+        print("async def endpoint ran on:", set(await asyncio.gather(*(thread_name("/info-async") for _ in range(5)))))
     return
 
 
@@ -127,15 +121,15 @@ def _(mo):
 
 
 @app.cell
-async def _(bench, gate, start_server, stop_server, web_button):
-    gate(web_button)
-    _server = start_server(
-        ["-m", "uvicorn", "workshop.web.fastapi_app:app", "--port", "8901", "--log-level", "warning"], 8901
-    )
-    for _endpoint in ("blocking-in-async", "blocking-in-def", "to-thread", "non-blocking"):
-        _r = await bench(f"http://127.0.0.1:8901/sleep/{_endpoint}", requests=100, concurrency=100)
-        print(f"/sleep/{_endpoint:<18} {_r['total_s']} s total, {_r['req_per_s']} req/s")
-    stop_server(_server)
+async def _(api, bench, timed):
+    with timed("blocking-in-async"):
+        await bench(f"{api}/sleep/blocking-in-async", requests=100, concurrency=100)
+    with timed("blocking-in-def  "):
+        await bench(f"{api}/sleep/blocking-in-def", requests=100, concurrency=100)
+    with timed("to-thread        "):
+        await bench(f"{api}/sleep/to-thread", requests=100, concurrency=100)
+    with timed("non-blocking     "):
+        await bench(f"{api}/sleep/non-blocking", requests=100, concurrency=100)
     return
 
 
@@ -158,15 +152,14 @@ def _(mo):
 
 
 @app.cell
-async def _(bench, db_button, gate, start_server, stop_server):
-    gate(db_button)
-    _server = start_server(
-        ["-m", "uvicorn", "workshop.web.fastapi_app:app", "--port", "8901", "--log-level", "warning"], 8901
-    )
-    for _endpoint in ("sync-in-def", "sync-in-async", "async"):
-        _r = await bench(f"http://127.0.0.1:8901/db/{_endpoint}", requests=2000, concurrency=100)
-        print(f"/db/{_endpoint:<14} {_r['req_per_s']} req/s, {_r['errors']} errors")
-    stop_server(_server)
+async def _(api, bench, db_button, gate, timed):
+    gate(db_button, "the database benchmarks")
+    with timed("def + sync driver         "):
+        await bench(f"{api}/db/sync-in-def", requests=2000, concurrency=100)
+    with timed("async def + sync driver   "):
+        await bench(f"{api}/db/sync-in-async", requests=2000, concurrency=100)
+    with timed("async def + async driver  "):
+        await bench(f"{api}/db/async", requests=2000, concurrency=100)
     return
 
 
@@ -182,31 +175,21 @@ def _(mo):
 
 
 @app.cell
-def _(mo):
-    cpu_button = mo.ui.run_button(label="Run the CPU benchmarks")
-    cpu_button
-    return (cpu_button,)
+async def _(api, asyncio, bench, start_server, timed):
+    with timed("inline, 1 worker    "):
+        await bench(f"{api}/cpu/inline", requests=32, concurrency=8)
+    with timed("to_thread, 1 worker "):
+        await bench(f"{api}/cpu/thread", requests=32, concurrency=8)
+    with timed("process pool        "):
+        await bench(f"{api}/cpu/process", requests=32, concurrency=8)
 
-
-@app.cell
-async def _(asyncio, bench, cpu_button, gate, start_server, stop_server):
-    gate(cpu_button)
-    _server = start_server(
-        ["-m", "uvicorn", "workshop.web.fastapi_app:app", "--port", "8901", "--log-level", "warning"], 8901
-    )
-    for _endpoint in ("inline", "thread", "process"):
-        _r = await bench(f"http://127.0.0.1:8901/cpu/{_endpoint}", requests=32, concurrency=8)
-        print(f"/cpu/{_endpoint:<8} 1 worker:  {_r['total_s']} s total")
-    stop_server(_server)
-
-    _server = start_server(
+    start_server(
         ["-m", "uvicorn", "workshop.web.fastapi_app:app", "--port", "8902", "--workers", "4", "--log-level", "warning"],
         8902,
     )
     await asyncio.sleep(2)  # let all 4 workers finish starting
-    _r = await bench("http://127.0.0.1:8902/cpu/inline", requests=32, concurrency=8)
-    print(f"/cpu/inline   4 workers: {_r['total_s']} s total")
-    stop_server(_server)
+    with timed("inline, 4 workers   "):
+        await bench("http://127.0.0.1:8902/cpu/inline", requests=32, concurrency=8)
     return
 
 
@@ -215,38 +198,31 @@ def _(mo):
     mo.md(r"""
     ## WebSockets: long-lived connections and fan-out
 
-    *Listings 9.9, 9.10.* A Starlette WebSocket endpoint pushes the number of connected users to **every** client whenever
-    someone joins or leaves, sending to all of them concurrently. Long-lived connections like this are something only ASGI can
-    serve efficiently. The count is per process: with `--workers N` you'd need Redis pub/sub or similar to share it.
+    *Listings 9.9, 9.10.* A Starlette WebSocket endpoint (`workshop/web/websocket_counter.py`) pushes the number of
+    connected users to **every** client whenever someone joins or leaves. Long-lived connections like this are something
+    only ASGI can serve efficiently. The count is per process: with `--workers N` you'd need Redis pub/sub or similar.
     """)
     return
 
 
 @app.cell
-def _(mo):
-    ws_button = mo.ui.run_button(label="Run the WebSocket demo")
-    ws_button
-    return (ws_button,)
-
-
-@app.cell
-async def _(aiohttp, asyncio, gate, start_server, stop_server, ws_button):
-    gate(ws_button)
-    _server = start_server(
+async def _(aiohttp, gate, start_server, web_button):
+    gate(web_button, "the web demos")
+    start_server(
         ["-m", "uvicorn", "workshop.web.websocket_counter:app", "--port", "8903", "--log-level", "warning"], 8903
     )
+    _url = "http://127.0.0.1:8903/counter"
+
     async with aiohttp.ClientSession() as _session:
-        _sockets = []
-        for _i in range(3):
-            _sockets.append(await _session.ws_connect("http://127.0.0.1:8903/counter"))
-            await asyncio.sleep(0.1)
-            print(f"user {_i + 1} joined -> every client now sees:", [(await _ws.receive()).data for _ws in _sockets])
-        await _sockets.pop().close()
-        await asyncio.sleep(0.1)
-        print("one user left     -> remaining clients see:", [(await _ws.receive()).data for _ws in _sockets])
-        for _ws in _sockets:
-            await _ws.close()
-    stop_server(_server)
+        _alice = await _session.ws_connect(_url)
+        print("alice joined: alice sees", (await _alice.receive()).data)
+
+        _bob = await _session.ws_connect(_url)
+        print("bob joined:   alice sees", (await _alice.receive()).data, "and bob sees", (await _bob.receive()).data)
+
+        await _bob.close()
+        print("bob left:     alice sees", (await _alice.receive()).data)
+        await _alice.close()
     return
 
 
@@ -269,26 +245,22 @@ def _(mo):
 
 
 @app.cell
-async def _(async_to_sync, asyncio, partial, sync_to_async, threading, time):
-    def blocking_sleep(seconds: float) -> str:
-        time.sleep(seconds)
-        return threading.current_thread().name
+async def _(async_to_sync, asyncio, sync_to_async, time, timed):
+    def blocking_call():
+        time.sleep(0.5)
 
-    for _sensitive in (True, False):
-        _fn = sync_to_async(partial(blocking_sleep, 0.5), thread_sensitive=_sensitive)
-        _start = time.perf_counter()
-        _threads = await asyncio.gather(*(_fn() for _ in range(4)))
-        print(
-            f"thread_sensitive={_sensitive!s:<5}: 4 x 0.5 s took {time.perf_counter() - _start:.2f} s on {len(set(_threads))} thread(s)"
-        )
+    with timed("4 calls, thread_sensitive=True "):
+        await asyncio.gather(*(sync_to_async(blocking_call)() for _ in range(4)))
 
-    async def fetch_all_async() -> list[float]:
-        return await asyncio.gather(*(asyncio.sleep(0.5, result=i) for i in range(10)))
+    with timed("4 calls, thread_sensitive=False"):
+        await asyncio.gather(*(sync_to_async(blocking_call, thread_sensitive=False)() for _ in range(4)))
 
-    # async_to_sync is for SYNC code (e.g. a Django sync view); here it runs in a plain thread
-    _start = time.perf_counter()
-    _results = await asyncio.to_thread(async_to_sync(fetch_all_async))
-    print(f"async_to_sync from sync code: {len(_results)} async calls in {time.perf_counter() - _start:.2f} s")
+    async def async_call() -> str:
+        await asyncio.sleep(0.5)
+        return "result of an async call"
+
+    # async_to_sync is for SYNC code (e.g. a Django sync view). Here the sync caller is a plain thread.
+    print(await asyncio.to_thread(async_to_sync(async_call)))
     return
 
 

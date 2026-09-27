@@ -46,11 +46,11 @@ notebook opens. A notebook can also run as a plain script: `uv run python notebo
 | 4 | [Concurrent requests](notebooks/04_concurrent_requests.py) | aiohttp, `gather`, `as_completed`, `wait` (ALL/FIRST_COMPLETED/FIRST_EXCEPTION/timeout), connection limits |
 | 5 | [Async databases](notebooks/05_async_databases.py) | asyncpg, one query per connection, pools and pool size, async generators, cursors |
 | 6 | [Multiprocessing](notebooks/06_multiprocessing.py) | process pools, `run_in_executor`, MapReduce, chunk size, shared memory, races and locks, one loop per process |
-| 7 | [Threads](notebooks/07_threads.py) | thread per connection, blocking libraries 5 ways, locks, RLock, deadlock, asyncio in a background thread, GIL-releasing C code |
+| 7 | [Threads](notebooks/07_threads.py) | thread per connection, blocking libraries from threads (`to_thread`), locks, RLock, deadlock, asyncio in a background thread, GIL-releasing C code |
 | 8 | [Streams and a chat server](notebooks/08_streams_and_chat.py) | protocols + futures, streams and back-pressure, concurrent chat server with idle timeout |
 | 9 | [Web apps](notebooks/09_web_apps.py) | WSGI vs ASGI, `def` vs `async def` endpoints under load, sync vs async DB drivers, CPU endpoints and `--workers`, WebSockets, `sync_to_async` |
 | 10 | [Microservices](notebooks/10_microservices.py) | backend-for-frontend fan-out, time budgets, graceful degradation, retries, circuit breaker |
-| 11 | [Synchronization](notebooks/11_synchronization.py) | races across `await`, Lock, Semaphore (measured), BoundedSemaphore, Event (and lost triggers), Condition |
+| 11 | [Synchronization](notebooks/11_synchronization.py) | races across `await`, Lock, Semaphore, BoundedSemaphore, Event (and lost triggers), Condition |
 | 12 | [Queues](notebooks/12_queues.py) | workers, back-pressure, background jobs behind an endpoint, crawler, priority/LIFO queues |
 | 13 | [Subprocesses](notebooks/13_subprocesses.py) | run/stream/timeout, pipe deadlock, parallel external tools with a limit, driving interactive programs |
 | 14 | [Under the hood](notebooks/14_under_the_hood.py) | contextvars, `sleep(0)`, uvloop (measured), generators as coroutines, **build a Future, a Task and an event loop, then run a server on them**, eager tasks |
@@ -116,25 +116,28 @@ Features from recent releases that the book predates. Only the standard library 
 notebooks/            the workshop (marimo notebooks)
 workshop/             support code that must live in real modules:
   cpu.py, shared_memory.py, map_reduce.py, db_workers.py   functions sent to process pools (pickled by module + name)
+  common/             database settings, `delay()`, `timed()` / `@async_timed()` timing helpers
   freethreading.py    benchmark run on each Python build (notebook 15)
   start_methods.py    module state for the fork/spawn/forkserver demo (notebook 18)
-  testserver.py       local HTTP server (/delay, /page, /stats): demos don't depend on the internet
-  bench.py            asyncio HTTP load generator
+  testserver.py       local HTTP server (/delay, /page): demos don't depend on the internet
+  bench.py            tiny asyncio HTTP load generator
   web/                FastAPI app with every sync/async variant, Starlette WebSocket counter
   microservices/      product / inventory / favorites / cart services + BFF
   children/           child programs: subprocess notebook, stuck asyncio service + script injected into it, warnings race, profiler target
   db_setup.py         create + seed the products database
-  nb.py               notebook helpers (run buttons, start/stop servers, thread-safe timeline, run on another Python build)
+  nb.py               notebook helpers (run buttons, servers in subprocesses, run on another Python build)
 locust/               optional Locust load tests
 docker/initdb/        Postgres databases (products, cart, favorites)
 ```
 
 ## Ports used
 
+Most demos let the OS pick a free port. The fixed ones:
+
 | Port | Used by |
 |---|---|
 | 55432 (`PGPORT`) | Postgres |
-| 8121, 8141-8142, 8301-8307, 8701-8703, 8801 | servers that run inside single demos |
+| 8702 | test server for blocking clients (notebook 7) |
 | 8200-8204 | microservices (notebook 10) |
 | 8901-8903 | FastAPI / WebSocket servers (notebook 9) |
 | 8089 | Locust UI |

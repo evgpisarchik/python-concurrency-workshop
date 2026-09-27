@@ -26,26 +26,15 @@ def _(mo):
 def _():
     import os
     import threading
-    import time
     from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 
     import marimo as mo
     import requests
 
+    from workshop.common import timed
     from workshop.cpu import fib
-    from workshop.nb import Timeline
 
-    return (
-        ProcessPoolExecutor,
-        ThreadPoolExecutor,
-        Timeline,
-        fib,
-        mo,
-        os,
-        requests,
-        threading,
-        time,
-    )
+    return ProcessPoolExecutor, ThreadPoolExecutor, fib, mo, os, requests, threading, timed
 
 
 @app.cell(hide_code=True)
@@ -59,17 +48,12 @@ def _(mo):
 
 
 @app.cell
-def _(requests, time):
-    _start = time.perf_counter()
-    _response = requests.get("https://www.example.com")  # I/O: waiting for the network
-    _io = time.perf_counter() - _start
+def _(requests, timed):
+    with timed("I/O: HTTP request"):
+        response = requests.get("https://www.example.com")  # waiting for the network
 
-    _start = time.perf_counter()
-    _formatted = "\n".join(f"{k}: {v}" for k, v in _response.headers.items())  # CPU: work on data in memory
-    _cpu = time.perf_counter() - _start
-
-    print(f"I/O  (HTTP request):   {_io * 1000:8.2f} ms")
-    print(f"CPU  (format headers): {_cpu * 1000:8.2f} ms")
+    with timed("CPU: format headers"):
+        "\n".join(f"{k}: {v}" for k, v in response.headers.items())  # work on data in memory
     return
 
 
@@ -84,19 +68,17 @@ def _(mo):
 
 
 @app.cell
-def _(ProcessPoolExecutor, Timeline, os, threading):
-    print(f"This notebook runs in process {os.getpid()} with {threading.active_count()} thread(s)")
+def _(ProcessPoolExecutor, os, threading):
+    print("this notebook's process:", os.getpid())
 
-    _timeline = Timeline()
-    _thread = threading.Thread(target=lambda: _timeline.log("hello from a second thread"), name="worker-thread")
+    with ProcessPoolExecutor(1) as _pool:
+        print("a child process:        ", _pool.submit(os.getpid).result())
+
+    _shared = []  # threads share their process's memory
+    _thread = threading.Thread(target=_shared.append, args=("written by another thread",))
     _thread.start()
-    _timeline.log("main thread keeps running while the worker runs")
-    _thread.join()  # wait for the worker to finish
-    _timeline.show()
-
-    # A child process gets its own pid. The function we send (os.getpid) must be importable by the child.
-    with ProcessPoolExecutor(max_workers=1) as _pool:
-        print(f"A child process has pid {_pool.submit(os.getpid).result()}")
+    _thread.join()
+    print(_shared)
     return
 
 
@@ -115,26 +97,18 @@ def _(mo):
 
 
 @app.cell
-def _(ProcessPoolExecutor, ThreadPoolExecutor, fib, time):
-    N = 30
-    _start = time.perf_counter()
-    fib(N), fib(N)
-    _sequential = time.perf_counter() - _start
+def _(ProcessPoolExecutor, ThreadPoolExecutor, fib, timed):
+    with timed("sequential"):
+        fib(33)
+        fib(33)
 
-    with ThreadPoolExecutor(2) as _threads:
-        _start = time.perf_counter()
-        list(_threads.map(fib, [N, N]))
-        _with_threads = time.perf_counter() - _start
+    with ThreadPoolExecutor(2) as _pool, timed("2 threads  (the GIL: no speedup)"):
+        list(_pool.map(fib, [33, 33]))
 
-    with ProcessPoolExecutor(2) as _processes:
-        _processes.submit(int).result()  # start the workers first, so start-up isn't timed
-        _start = time.perf_counter()
-        list(_processes.map(fib, [N, N]))
-        _with_processes = time.perf_counter() - _start
-
-    print(f"sequential:  {_sequential:.2f} s")
-    print(f"2 threads:   {_with_threads:.2f} s  <- the GIL: no speedup")
-    print(f"2 processes: {_with_processes:.2f} s  <- real parallelism")
+    with ProcessPoolExecutor(2) as _pool:
+        list(_pool.map(fib, [33, 33]))  # the first run also starts the workers, so time the second
+        with timed("2 processes (real parallelism)"):
+            list(_pool.map(fib, [33, 33]))
     return
 
 
@@ -149,21 +123,14 @@ def _(mo):
 
 
 @app.cell
-def _(ThreadPoolExecutor, requests, time):
-    def read_example() -> int:
-        return requests.get("https://www.example.com").status_code
+def _(ThreadPoolExecutor, requests, timed):
+    _urls = ["https://www.example.com"] * 4
 
-    _start = time.perf_counter()
-    [read_example() for _ in range(4)]
-    _sequential = time.perf_counter() - _start
+    with timed("4 requests, one by one"):
+        [requests.get(url) for url in _urls]
 
-    with ThreadPoolExecutor(4) as _threads:
-        _start = time.perf_counter()
-        list(_threads.map(lambda _: read_example(), range(4)))
-        _with_threads = time.perf_counter() - _start
-
-    print(f"4 requests sequentially: {_sequential:.2f} s")
-    print(f"4 requests in 4 threads: {_with_threads:.2f} s")
+    with ThreadPoolExecutor(4) as _pool, timed("4 requests, 4 threads"):
+        list(_pool.map(requests.get, _urls))
     return
 
 

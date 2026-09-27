@@ -21,15 +21,12 @@ def make_app(name: str) -> web.Application:
     table, _ = SERVICES[name]
 
     async def handler(request: web.Request) -> web.Response:
-        try:
-            user_id = int(request.match_info["id"])
-        except ValueError:
-            raise web.HTTPBadRequest() from None
+        user_id = int(request.match_info["id"])
         rows = await request.app[DB_KEY].fetch(f"SELECT product_id FROM {table} WHERE user_id = $1", user_id)
         return web.json_response([dict(row) for row in rows])
 
     app = with_database(web.Application(), name)
-    app.router.add_get(f"/users/{{id}}/{name}", handler)
+    app.router.add_get(rf"/users/{{id:\d+}}/{name}", handler)  # only numeric ids match
     return app
 
 

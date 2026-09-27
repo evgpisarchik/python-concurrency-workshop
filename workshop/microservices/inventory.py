@@ -13,7 +13,7 @@ routes = web.RouteTableDef()
 @routes.get("/products/{id}/inventory")
 async def get_inventory(request: web.Request) -> web.Response:
     await asyncio.sleep(random.randint(0, 20) / 10)
-    return web.json_response({"inventory": random.randint(0, 100)})
+    return web.json_response(random.randint(0, 100))  # items in stock
 
 
 app = web.Application()

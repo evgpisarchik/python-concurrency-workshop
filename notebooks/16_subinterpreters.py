@@ -28,12 +28,12 @@ def _(mo):
 
 @app.cell
 def _():
-    import time
     from concurrent import interpreters
     from concurrent.futures import InterpreterPoolExecutor, ProcessPoolExecutor, ThreadPoolExecutor
 
     import marimo as mo
 
+    from workshop.common import timed
     from workshop.cpu import fib
 
     return (
@@ -43,7 +43,7 @@ def _():
         fib,
         interpreters,
         mo,
-        time,
+        timed,
     )
 
 
@@ -163,17 +163,15 @@ def _(mo):
 
 
 @app.cell
-def _(InterpreterPoolExecutor, ProcessPoolExecutor, ThreadPoolExecutor, fib, time):
-    def four_fibs(executor_class) -> float:
-        """Seconds for 4 × fib(30) on 4 workers, including starting the workers."""
-        start = time.perf_counter()
-        with executor_class(4) as pool:
-            list(pool.map(fib, [30] * 4))
-        return time.perf_counter() - start
+def _(InterpreterPoolExecutor, ProcessPoolExecutor, ThreadPoolExecutor, fib, timed):
+    with ThreadPoolExecutor(4) as _pool, timed("threads     "):
+        list(_pool.map(fib, [30] * 4))
 
-    print(f"threads:      {four_fibs(ThreadPoolExecutor):.2f} s")
-    print(f"interpreters: {four_fibs(InterpreterPoolExecutor):.2f} s")
-    print(f"processes:    {four_fibs(ProcessPoolExecutor):.2f} s")
+    with InterpreterPoolExecutor(4) as _pool, timed("interpreters"):
+        list(_pool.map(fib, [30] * 4))
+
+    with ProcessPoolExecutor(4) as _pool, timed("processes   "):
+        list(_pool.map(fib, [30] * 4))
     return
 
 

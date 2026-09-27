@@ -28,13 +28,13 @@ def _(mo):
 @app.cell
 def _():
     import asyncio
-    import random
+    import itertools
     import time
-    from datetime import datetime, timedelta
 
     import aiohttp
     import marimo as mo
 
+    from workshop.common import timed
     from workshop.microservices import BFF_PORT, CART_PORT, FAVORITES_PORT, INVENTORY_PORT, PRODUCT_PORT
     from workshop.nb import gate, start_server, stop_server
 
@@ -46,14 +46,13 @@ def _():
         PRODUCT_PORT,
         aiohttp,
         asyncio,
-        datetime,
         gate,
+        itertools,
         mo,
-        random,
         start_server,
         stop_server,
         time,
-        timedelta,
+        timed,
     )
 
 
@@ -76,44 +75,35 @@ async def _(
     services_button,
     start_server,
     stop_server,
-    time,
+    timed,
 ):
     gate(services_button)
-    _services = {
-        "products": start_server(["-m", "workshop.microservices.products"], PRODUCT_PORT),
-        "inventory": start_server(["-m", "workshop.microservices.inventory"], INVENTORY_PORT),
-        "favorites": start_server(["-m", "workshop.microservices.user_lists", "favorites"], FAVORITES_PORT),
-        "cart": start_server(["-m", "workshop.microservices.user_lists", "cart"], CART_PORT),
-        "bff": start_server(["-m", "workshop.microservices.bff"], BFF_PORT),
-    }
+    _products = start_server(["-m", "workshop.microservices.products"], PRODUCT_PORT)
+    start_server(["-m", "workshop.microservices.inventory"], INVENTORY_PORT)
+    start_server(["-m", "workshop.microservices.user_lists", "favorites"], FAVORITES_PORT)
+    _cart = start_server(["-m", "workshop.microservices.user_lists", "cart"], CART_PORT)
+    start_server(["-m", "workshop.microservices.bff"], BFF_PORT)
 
-    async def call_bff(label: str):
+    async def call_bff():
         async with aiohttp.ClientSession() as session:
-            start = time.perf_counter()
             async with session.get(f"http://127.0.0.1:{BFF_PORT}/products/all") as response:
                 body = await response.json()
-            elapsed = time.perf_counter() - start
         if response.status != 200:
-            print(f"{label:<28} HTTP {response.status} in {elapsed:.2f} s: {body['error']}")
-            return
-        known = sum(p["inventory"] is not None for p in body["products"])
-        print(
-            f"{label:<28} HTTP 200 in {elapsed:.2f} s: cart={body['cart_items']}, favorites={body['favorite_items']}, "
-            f"inventory known for {known}/{len(body['products'])} products"
-        )
+            print("HTTP", response.status, body)
+        else:
+            inventory = [product["inventory"] for product in body["products"]]
+            print("HTTP 200, cart:", body["cart"], "| inventory:", inventory)
 
-    try:
-        for _i in range(3):
-            await call_bff(f"all services up (call {_i + 1})")
+    with timed("all services up"):
+        await call_bff()
 
-        stop_server(_services.pop("cart"))
-        await call_bff("cart service down")
+    stop_server(_cart)
+    with timed("cart service down"):
+        await call_bff()
 
-        stop_server(_services.pop("products"))
-        _ = await call_bff("products service down")
-    finally:
-        for _proc in _services.values():
-            stop_server(_proc)
+    stop_server(_products)
+    with timed("products service down"):
+        await call_bff()
     return
 
 
@@ -123,20 +113,20 @@ def _(mo):
     What you should see:
 
     * every call takes ~1 s at most, however slow inventory gets, because of the time budget
-    * products whose inventory didn't arrive in time get `null` instead of failing the whole page
-    * optional data (cart) that's missing becomes `null`
+    * products whose inventory didn't arrive in time get `None` instead of failing the whole page
+    * optional data (cart) that's missing becomes `None`
     * required data (products) that's missing produces an error response, **fast**
 
     The core of `bff.py`:
 
     ```python
-    products = asyncio.create_task(get_json(session, f"{PRODUCT_BASE}/products"))
-    favorites = asyncio.create_task(get_json(session, f"{FAVORITE_BASE}/users/3/favorites"))
-    cart = asyncio.create_task(get_json(session, f"{CART_BASE}/users/3/cart"))
+    products = asyncio.create_task(get_json(session, PRODUCT_PORT, "/products"))
+    favorites = asyncio.create_task(get_json(session, FAVORITES_PORT, "/users/3/favorites"))
+    cart = asyncio.create_task(get_json(session, CART_PORT, "/users/3/cart"))
     done, pending = await asyncio.wait([products, favorites, cart], timeout=1.0)
-    if products in pending: ...                   # 504
+    if products not in done: ...                  # 504
     if products.exception() is not None: ...      # 500
-    # optional results: use them if done without error, otherwise None (and cancel if still pending)
+    cart_items = result_or_none(cart, done)       # optional: None if it failed or was too slow
     ```
 
     ## Retries
@@ -148,33 +138,31 @@ def _(mo):
 
 
 @app.cell
-async def _(asyncio, random):
-    class TooManyRetries(Exception):
-        pass
-
-    async def retry(coro_factory, max_retries: int, timeout: float, retry_interval: float):
-        for attempt in range(1, max_retries + 1):
+async def _(asyncio, itertools):
+    async def retry(coro_factory, attempts: int, timeout: float, pause: float):
+        for attempt in range(1, attempts + 1):
             try:
-                return await asyncio.wait_for(coro_factory(), timeout=timeout)
+                return await asyncio.wait_for(coro_factory(), timeout)
             except Exception as error:
                 print(f"  attempt {attempt} failed: {error!r}")
-                await asyncio.sleep(retry_interval)
-        raise TooManyRetries()
+                await asyncio.sleep(pause)
+        raise RuntimeError(f"gave up after {attempts} attempts")
 
-    async def flaky():
-        if random.random() < 0.6:
+    _calls = itertools.count(1)
+
+    async def flaky_service():
+        if next(_calls) < 3:  # fails twice, then works
             raise ConnectionError("blip")
         return "ok"
 
-    async def always_timeout():
-        await asyncio.sleep(1)
+    async def dead_service():
+        await asyncio.sleep(10)
 
-    random.seed(3)
-    print("flaky service:", await retry(flaky, max_retries=5, timeout=0.1, retry_interval=0.1))
+    print("flaky service:", await retry(flaky_service, attempts=5, timeout=0.1, pause=0.1))
     try:
-        _ = await retry(always_timeout, max_retries=3, timeout=0.1, retry_interval=0.1)
-    except TooManyRetries:
-        print("always-timeout service: retried too many times")
+        await retry(dead_service, attempts=3, timeout=0.1, pause=0.1)
+    except RuntimeError as _error:
+        print("dead service:", _error)
     return
 
 
@@ -191,67 +179,53 @@ def _(mo):
 
 
 @app.cell
-def _(asyncio, datetime, timedelta):
-    class CircuitOpenException(Exception):
+def _(asyncio, time):
+    class CircuitOpenError(Exception):
         pass
 
     class CircuitBreaker:
-        def __init__(self, callback, timeout: float, time_window: float, max_failures: int, reset_interval: float):
-            self.callback, self.timeout, self.time_window = callback, timeout, time_window
-            self.max_failures, self.reset_interval = max_failures, reset_interval
-            self.last_request_time = None
-            self.last_failure_time = None
-            self.current_failures = 0
+        def __init__(self, callback, timeout: float, max_failures: int, reset_interval: float):
+            self.callback = callback
+            self.timeout = timeout
+            self.max_failures = max_failures
+            self.reset_interval = reset_interval
+            self.failures = 0
+            self.last_failure = 0.0
 
-        async def request(self, *args, **kwargs):
-            if self.current_failures >= self.max_failures:
-                if datetime.now() > self.last_request_time + timedelta(seconds=self.reset_interval):
-                    self._reset("circuit half-open: trying one request")
-                    return await self._do_request(*args, **kwargs)
-                raise CircuitOpenException("circuit open: failing fast")
-            if self.last_failure_time and datetime.now() > self.last_failure_time + timedelta(seconds=self.time_window):
-                self._reset("failure window elapsed: resetting count")
-            return await self._do_request(*args, **kwargs)
-
-        def _reset(self, message: str):
-            print(f"  {message}")
-            self.last_failure_time = None
-            self.current_failures = 0
-
-        async def _do_request(self, *args, **kwargs):
+        async def request(self):
+            if self.failures >= self.max_failures:
+                if time.monotonic() - self.last_failure < self.reset_interval:
+                    raise CircuitOpenError("circuit open: failing fast")
+                self.failures = 0  # half-open: let one request through to test the service
             try:
-                self.last_request_time = datetime.now()
-                return await asyncio.wait_for(self.callback(*args, **kwargs), timeout=self.timeout)
+                return await asyncio.wait_for(self.callback(), self.timeout)
             except Exception:
-                self.current_failures += 1
-                self.last_failure_time = self.last_failure_time or datetime.now()
+                self.failures += 1
+                self.last_failure = time.monotonic()
                 raise
 
-    return CircuitBreaker, CircuitOpenException
+    return CircuitBreaker, CircuitOpenError
 
 
 @app.cell
-async def _(CircuitBreaker, CircuitOpenException, asyncio, time):
+async def _(CircuitBreaker, CircuitOpenError, asyncio, timed):
     async def slow_service():
         await asyncio.sleep(1)
 
-    async def attempt(breaker: CircuitBreaker, n: int):
-        start = time.perf_counter()
-        try:
-            await breaker.request()
-            outcome = "ok"
-        except CircuitOpenException as error:
-            outcome = str(error)
-        except TimeoutError:
-            outcome = "timed out"
-        print(f"request {n}: {outcome:<27} ({time.perf_counter() - start:.2f} s)")
+    _breaker = CircuitBreaker(slow_service, timeout=0.5, max_failures=2, reset_interval=2)
 
-    _breaker = CircuitBreaker(slow_service, timeout=0.5, time_window=5, max_failures=2, reset_interval=2)
-    for _n in range(1, 5):
-        await attempt(_breaker, _n)
-    print("waiting 2 s for the breaker to allow a trial request...")
-    await asyncio.sleep(2)
-    await attempt(_breaker, 5)
+    async def attempt(name: str):
+        with timed(name):
+            try:
+                await _breaker.request()
+            except (TimeoutError, CircuitOpenError) as error:
+                print(f"{name}: {error!r}")
+
+    await attempt("request 1")
+    await attempt("request 2")
+    await attempt("request 3")  # the circuit is open now
+    await asyncio.sleep(2)  # wait for the reset interval
+    await attempt("request 4")  # a trial request reaches the service again
     return
 
 
@@ -261,7 +235,7 @@ def _(mo):
     ## Takeaways
 
     * Fan out to independent services **concurrently**, with a time budget (`wait(..., timeout=)`).
-    * Decide per dependency: **required** (fail fast with 5xx) or **optional** (degrade to `null`).
+    * Decide per dependency: **required** (fail fast with 5xx) or **optional** (degrade to `None`).
     * Retries absorb short blips. Circuit breakers stop you from hammering, and waiting on, a service that's down.
     """)
     return

@@ -21,10 +21,7 @@ def _(mo):
 @app.cell
 def _():
     import asyncio
-    import random
-    import time
     from dataclasses import dataclass, field
-    from enum import IntEnum
     from urllib.parse import urljoin
 
     import aiohttp
@@ -32,22 +29,10 @@ def _():
     from aiohttp import web
     from bs4 import BeautifulSoup
 
-    from workshop.testserver import serve
+    from workshop.common import timed
+    from workshop.testserver import start
 
-    return (
-        BeautifulSoup,
-        IntEnum,
-        aiohttp,
-        asyncio,
-        dataclass,
-        field,
-        mo,
-        random,
-        serve,
-        time,
-        urljoin,
-        web,
-    )
+    return BeautifulSoup, aiohttp, asyncio, dataclass, field, mo, start, timed, urljoin, web
 
 
 @app.cell(hide_code=True)
@@ -55,38 +40,29 @@ def _(mo):
     mo.md(r"""
     ## Workers sharing a fixed batch
 
-    *Listing 12.1.* 10 customers, 3 cashiers. Each cashier takes the next customer from the line.
+    *Listing 12.1.* 6 customers, 3 cashiers. Each cashier takes the next customer from the line.
     """)
     return
 
 
 @app.cell
-async def _(asyncio, dataclass, random, time):
-    @dataclass
-    class Customer:
-        customer_id: int
-        items: int
-
-    async def cashier(number: int, line: asyncio.Queue, served: dict):
+async def _(asyncio, timed):
+    async def cashier(name: str, line: asyncio.Queue):
         while True:
-            customer = await line.get()
-            await asyncio.sleep(customer.items * 0.05)  # scanning items
-            served.setdefault(number, []).append(customer.customer_id)
+            items = await line.get()
+            await asyncio.sleep(items * 0.1)  # scanning items
+            print(f"{name} served a customer with {items} items")
             line.task_done()
 
     _line = asyncio.Queue()
-    for _i in range(10):
-        _line.put_nowait(Customer(_i, random.randint(1, 10)))
+    for _items in [3, 8, 1, 5, 2, 6]:
+        _line.put_nowait(_items)
 
-    _served = {}
-    _start = time.perf_counter()
-    _cashiers = [asyncio.create_task(cashier(n, _line, _served)) for n in range(3)]
-    await _line.join()  # every customer checked out
-    for _c in _cashiers:
-        _c.cancel()
-    print(f"all customers served in {time.perf_counter() - _start:.2f} s")
-    for _n, _ids in sorted(_served.items()):
-        print(f"  cashier {_n} served customers {_ids}")
+    _cashiers = [asyncio.create_task(cashier(f"cashier {n}", _line)) for n in range(3)]
+    with timed("all customers served"):
+        await _line.join()
+    for _cashier in _cashiers:
+        _cashier.cancel()
     return
 
 
@@ -95,39 +71,35 @@ def _(mo):
     mo.md(r"""
     ## Back-pressure with a bounded queue
 
-    *Listing 12.2.* The producer creates work faster than 2 consumers can handle it. With `Queue(maxsize=5)`, `await put()`
-    **waits** once the line is full, so the producer slows to the consumers' pace and memory stays bounded.
-    An unbounded queue would grow without limit.
+    *Listing 12.2.* The producer creates 40 items much faster than 2 consumers can handle them. With `Queue(maxsize=5)`,
+    `await put()` **waits** once the queue is full, so the producer slows to the consumers' pace and memory stays
+    bounded. An unbounded queue just grows.
     """)
     return
 
 
 @app.cell
-async def _(asyncio, time):
-    async def producer(queue: asyncio.Queue, items: int, waited: list, sizes: list):
-        for i in range(items):
-            start = time.perf_counter()
-            await queue.put(i)
-            waited.append(time.perf_counter() - start)
-            sizes.append(queue.qsize())
-
+async def _(asyncio):
     async def consumer(queue: asyncio.Queue):
         while True:
             await queue.get()
             await asyncio.sleep(0.1)
             queue.task_done()
 
-    async def run(maxsize: int):
-        queue, waited, sizes = asyncio.Queue(maxsize=maxsize), [], []
+    async def peak_queue_length(maxsize: int) -> int:
+        queue = asyncio.Queue(maxsize)
         consumers = [asyncio.create_task(consumer(queue)) for _ in range(2)]
-        await producer(queue, 40, waited, sizes)
+        peak = 0
+        for item in range(40):
+            await queue.put(item)  # waits while the queue is full
+            peak = max(peak, queue.qsize())
         await queue.join()
-        for c in consumers:
-            c.cancel()
-        print(f"maxsize={maxsize}: peak queue length {max(sizes)}, producer waited {sum(waited):.2f} s on put()")
+        for task in consumers:
+            task.cancel()
+        return peak
 
-    await run(0)  # 0 means unbounded
-    await run(5)
+    print("unbounded queue, peak length:", await peak_queue_length(0))
+    print("Queue(maxsize=5), peak length:", await peak_queue_length(5))
     return
 
 
@@ -137,62 +109,61 @@ def _(mo):
     ## Background jobs behind a web endpoint
 
     *Listings 12.3, 12.7.* The endpoint puts the order on a queue and answers **immediately**. Worker tasks do the slow part
-    later. On shutdown the app gives queued work up to 10 s to finish before cancelling the workers.
-    With a `PriorityQueue`, power users' orders would jump the line (see priorities below).
+    later. On shutdown the app waits for queued work to finish before stopping the workers.
+    With a `PriorityQueue`, power users' orders could jump the line (see priorities below).
     """)
     return
 
 
 @app.cell
-async def _(aiohttp, asyncio, time, web):
-    QUEUE_KEY = web.AppKey("order_queue", asyncio.Queue)
-    TASKS_KEY = web.AppKey("order_workers", list)
+async def _(aiohttp, asyncio, timed, web):
+    class OrderService:
+        """A web endpoint that queues orders, plus worker tasks that process them later."""
 
-    async def process_orders(queue: asyncio.Queue, processed: list):
-        while True:
-            order = await queue.get()
-            await asyncio.sleep(order["seconds"])  # the slow part: payment, email, ...
-            processed.append(order["id"])
-            queue.task_done()
+        def __init__(self):
+            self.orders = asyncio.Queue()
+            self.processed = []
+            self._workers = []
+            self._runner = None
 
-    def make_order_app(processed: list) -> web.Application:
-        async def place_order(request: web.Request) -> web.Response:
-            order = await request.json()
-            await request.app[QUEUE_KEY].put(order)
-            return web.json_response({"status": "accepted", "id": order["id"]}, status=202)
+        async def start(self, workers: int) -> str:
+            """Start the workers and the web server; return the order URL."""
+            self._workers = [asyncio.create_task(self._process_orders()) for _ in range(workers)]
+            app = web.Application()
+            app.router.add_post("/order", self._place_order)
+            self._runner = web.AppRunner(app)
+            await self._runner.setup()
+            await web.TCPSite(self._runner, "127.0.0.1", 0).start()
+            return f"http://127.0.0.1:{self._runner.addresses[0][1]}/order"
 
-        async def start_workers(app):
-            app[QUEUE_KEY] = asyncio.Queue(maxsize=50)
-            app[TASKS_KEY] = [asyncio.create_task(process_orders(app[QUEUE_KEY], processed)) for _ in range(5)]
+        async def shutdown(self):
+            await self.orders.join()  # finish the queued orders first
+            for worker in self._workers:
+                worker.cancel()
+            await self._runner.cleanup()
 
-        async def drain_and_stop(app):
-            try:
-                await asyncio.wait_for(app[QUEUE_KEY].join(), timeout=10)
-            finally:
-                for task in app[TASKS_KEY]:
-                    task.cancel()
+        async def _place_order(self, request: web.Request) -> web.Response:
+            await self.orders.put(await request.json())
+            return web.json_response({"status": "accepted"}, status=202)
 
-        app = web.Application()
-        app.router.add_post("/order", place_order)
-        app.on_startup.append(start_workers)
-        app.on_shutdown.append(drain_and_stop)
-        return app
+        async def _process_orders(self):
+            while True:
+                order = await self.orders.get()
+                await asyncio.sleep(0.5)  # the slow part: payment, email, ...
+                self.processed.append(order)
+                self.orders.task_done()
 
-    _processed = []
-    _runner = web.AppRunner(make_order_app(_processed))
-    await _runner.setup()
-    await web.TCPSite(_runner, "127.0.0.1", 8121).start()
+    _service = OrderService()
+    _url = await _service.start(workers=5)
 
     async with aiohttp.ClientSession() as _session:
-        _start = time.perf_counter()
-        _responses = await asyncio.gather(
-            *(_session.post("http://127.0.0.1:8121/order", json={"id": i, "seconds": 0.5}) for i in range(20))
-        )
-        print(f"20 orders accepted in {time.perf_counter() - _start:.3f} s (HTTP {_responses[0].status})")
-    print(f"processed so far: {len(_processed)}")
-    _start = time.perf_counter()
-    await _runner.cleanup()  # graceful shutdown drains the queue
-    print(f"shutdown drained the queue in {time.perf_counter() - _start:.2f} s; processed {len(_processed)} orders")
+        with timed("20 orders accepted"):
+            await asyncio.gather(*(_session.post(_url, json={"id": i}) for i in range(20)))
+    print("processed so far:", len(_service.processed))
+
+    with timed("graceful shutdown"):
+        await _service.shutdown()
+    print("processed:", len(_service.processed))
     return
 
 
@@ -208,44 +179,45 @@ def _(mo):
 
 
 @app.cell
-async def _(BeautifulSoup, aiohttp, asyncio, dataclass, serve, time, urljoin):
-    @dataclass
-    class WorkItem:
-        depth: int
-        url: str
+async def _(BeautifulSoup, aiohttp, asyncio, start, timed, urljoin):
+    class Crawler:
+        def __init__(self, max_depth: int):
+            self.max_depth = max_depth
+            self.queue = asyncio.Queue()  # (depth, url) pairs
+            self.seen = set()
 
-    async def crawl_worker(queue: asyncio.Queue, session: aiohttp.ClientSession, max_depth: int, seen: set):
-        while True:
-            item = await queue.get()
-            try:
-                async with session.get(item.url, timeout=aiohttp.ClientTimeout(total=3)) as response:
-                    body = await response.text()
-                if item.depth < max_depth:
-                    for link in BeautifulSoup(body, "html.parser").find_all("a", href=True):
-                        url = urljoin(item.url, link["href"])
-                        if url not in seen:
-                            seen.add(url)
-                            queue.put_nowait(WorkItem(item.depth + 1, url))
-            except Exception as error:
-                print(f"error crawling {item.url}: {error!r}")
-            finally:
-                queue.task_done()
+        async def crawl(self, start_url: str, workers: int) -> int:
+            """Crawl from `start_url` with N worker tasks; return how many pages were found."""
+            self._add(start_url, depth=0)
+            async with aiohttp.ClientSession() as session:
+                tasks = [asyncio.create_task(self._worker(session)) for _ in range(workers)]
+                await self.queue.join()  # every page, including the ones found along the way, is done
+                for task in tasks:
+                    task.cancel()
+            return len(self.seen)
 
-    async def crawl(start_url: str, workers: int, max_depth: int) -> int:
-        queue, seen = asyncio.Queue(), {start_url}
-        queue.put_nowait(WorkItem(0, start_url))
-        async with aiohttp.ClientSession() as session:
-            tasks = [asyncio.create_task(crawl_worker(queue, session, max_depth, seen)) for _ in range(workers)]
-            await queue.join()
-            for task in tasks:
-                task.cancel()
-        return len(seen)
+        async def _worker(self, session: aiohttp.ClientSession):
+            while True:
+                depth, url = await self.queue.get()
+                try:
+                    async with session.get(url) as response:
+                        html = await response.text()
+                    if depth < self.max_depth:
+                        for link in BeautifulSoup(html, "html.parser").find_all("a", href=True):
+                            self._add(urljoin(url, link["href"]), depth + 1)
+                finally:
+                    self.queue.task_done()
 
-    async with serve() as _base:
-        for _workers in (1, 10):
-            _start = time.perf_counter()
-            _pages = await crawl(f"{_base}/page/0", workers=_workers, max_depth=3)
-            print(f"{_workers:>2} worker(s): crawled {_pages} pages in {time.perf_counter() - _start:.2f} s")
+        def _add(self, url: str, depth: int):
+            if url not in self.seen:
+                self.seen.add(url)
+                self.queue.put_nowait((depth, url))
+
+    _site = f"{await start()}/page/0"
+    with timed("1 worker"):
+        print("pages crawled:", await Crawler(max_depth=3).crawl(_site, workers=1))
+    with timed("10 workers"):
+        print("pages crawled:", await Crawler(max_depth=3).crawl(_site, workers=10))
     return
 
 
@@ -265,47 +237,28 @@ def _(mo):
 
 
 @app.cell
-def _(IntEnum, asyncio, dataclass, field):
-    class UserType(IntEnum):
-        POWER_USER = 1
-        NORMAL_USER = 2
-
+def _(asyncio, dataclass, field):
     @dataclass(order=True)
     class Job:
-        priority: int
-        data: str = field(compare=False)
+        priority: int  # 1 = power user, 2 = normal user
+        name: str = field(compare=False)
 
-    @dataclass(order=True)
-    class FairJob:
-        priority: int
-        order: int  # tie-breaker: insertion sequence
-        data: str = field(compare=False)
+    _jobs = [(2, "normal 1"), (2, "normal 2"), (2, "normal 3"), (1, "power 1"), (2, "normal 4")]
 
-    def drain(queue: asyncio.Queue) -> list[str]:
-        return [queue.get_nowait().data for _ in range(queue.qsize())]
-
-    _jobs = [
-        (UserType.NORMAL_USER, "normal #1"),
-        (UserType.NORMAL_USER, "normal #2"),
-        (UserType.NORMAL_USER, "normal #3"),
-        (UserType.POWER_USER, "power #1"),
-        (UserType.NORMAL_USER, "normal #4"),
-    ]
-
-    _pq = asyncio.PriorityQueue()
-    for _p, _d in _jobs:
-        _pq.put_nowait(Job(_p, _d))
-    print("PriorityQueue:           ", drain(_pq))
+    _priority = asyncio.PriorityQueue()
+    for _p, _name in _jobs:
+        _priority.put_nowait(Job(_p, _name))
+    print("PriorityQueue:          ", [_priority.get_nowait().name for _ in _jobs])
 
     _fair = asyncio.PriorityQueue()
-    for _i, (_p, _d) in enumerate(_jobs):
-        _fair.put_nowait(FairJob(_p, _i, _d))
-    print("PriorityQueue + counter: ", drain(_fair))
+    for _order, (_p, _name) in enumerate(_jobs):
+        _fair.put_nowait((_p, _order, _name))  # the order breaks ties
+    print("PriorityQueue + counter:", [_fair.get_nowait()[2] for _ in _jobs])
 
     _lifo = asyncio.LifoQueue()
-    for _i, (_p, _d) in enumerate(_jobs):
-        _lifo.put_nowait(FairJob(_p, _i, _d))
-    print("LifoQueue:               ", drain(_lifo))
+    for _p, _name in _jobs:
+        _lifo.put_nowait(_name)
+    print("LifoQueue:              ", [_lifo.get_nowait() for _ in _jobs])
     return
 
 

@@ -146,22 +146,17 @@ def _(mo):
 
 @app.cell
 def _(Counter, lost_updates, threading):
-    _counter = Counter()
-    _lock = threading.Lock()
+    class LockedCounter(Counter):
+        def __init__(self):
+            super().__init__()
+            self._lock = threading.Lock()
 
-    def add_with_lock():
-        for _ in range(200_000):
-            with _lock:
-                _counter.value += 1
+        def increment(self):
+            with self._lock:
+                super().increment()
 
-    _threads = [threading.Thread(target=add_with_lock) for _ in range(4)]
-    for _t in _threads:
-        _t.start()
-    for _t in _threads:
-        _t.join()
-
-    print(f"without a lock: {lost_updates():,} lost")
-    print(f"with a lock:    {800_000 - _counter.value:,} lost")
+    print(f"without a lock: {lost_updates(Counter()):,} lost")
+    print(f"with a lock:    {lost_updates(LockedCounter()):,} lost")
     return
 
 

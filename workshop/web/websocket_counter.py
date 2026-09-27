@@ -27,15 +27,9 @@ class UserCounter(WebSocketEndpoint):
         await self._send_count()
 
     async def _send_count(self):
-        if not UserCounter.sockets:
-            return
-        count_str = str(len(UserCounter.sockets))
-        # send to every client concurrently; one slow client doesn't delay the others
-        task_to_socket = {asyncio.create_task(ws.send_text(count_str)): ws for ws in UserCounter.sockets}
-        done, _ = await asyncio.wait(task_to_socket)
-        for task in done:
-            if task.exception() is not None and task_to_socket[task] in UserCounter.sockets:
-                UserCounter.sockets.remove(task_to_socket[task])
+        count = str(len(UserCounter.sockets))
+        # Send to every client concurrently: one slow or dead client doesn't delay the others
+        await asyncio.gather(*(ws.send_text(count) for ws in UserCounter.sockets), return_exceptions=True)
 
 
 app = Starlette(routes=[WebSocketRoute("/counter", UserCounter)])

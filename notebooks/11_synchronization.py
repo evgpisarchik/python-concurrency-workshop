@@ -20,98 +20,49 @@ def _(mo):
 @app.cell
 def _():
     import asyncio
-    import time
-    from enum import Enum
 
-    import aiohttp
     import marimo as mo
 
-    from workshop.testserver import serve
+    from workshop.common import timed
 
-    return Enum, aiohttp, asyncio, mo, serve, time
+    return asyncio, mo, timed
 
 
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## When asyncio code races
+    ## A race across `await`, fixed with a Lock
 
-    *Listings 11.1, 11.2.* 100 tasks each increment a counter. When the read-modify-write has **no `await` inside** it
-    never races. With an `await` between the read and the write, every task reads the same old value and updates get lost.
+    *Listings 11.1–11.5.* 100 tasks each increment a counter. With an `await` between the read and the write, every task
+    reads the same old value and updates get lost. An `asyncio.Lock` lets only one task at a time run the
+    read-await-write section.
     """)
     return
 
 
 @app.cell
 async def _(asyncio):
-    _state = {"counter": 0}
-
-    async def increment_safely():
-        await asyncio.sleep(0.01)
-        _state["counter"] = _state["counter"] + 1  # no await between read and write
-
-    async def increment_racy():
-        value = _state["counter"]  # read
-        await asyncio.sleep(0.01)  # other tasks run here and read the same value
-        _state["counter"] = value + 1  # write back a stale value
-
-    await asyncio.gather(*(increment_safely() for _ in range(100)))
-    print(f"no await inside: counter = {_state['counter']} (expected 100)")
-
-    _state["counter"] = 0
-    await asyncio.gather(*(increment_racy() for _ in range(100)))
-    print(f"await inside:    counter = {_state['counter']} (expected 100)")
-    return
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    ## Lock
-
-    *Listings 11.3–11.5.* A realistic race: while we broadcast to every user, one of them disconnects, and its socket gets
-    closed before its `send()` runs. A lock makes "broadcast" and "remove user" mutually exclusive.
-    """)
-    return
-
-
-@app.cell
-async def _(asyncio):
-    class MockSocket:
+    class Counter:
         def __init__(self):
-            self.closed = False
+            self.value = 0
+            self._lock = asyncio.Lock()
 
-        async def send(self, message: str):
-            if self.closed:
-                raise ConnectionError("socket is closed")
-            await asyncio.sleep(0.5)
+        async def increment(self):
+            value = self.value  # read
+            await asyncio.sleep(0.01)  # other tasks run here and read the same value
+            self.value = value + 1  # write back a stale value
 
-    async def broadcast_demo(use_lock: bool):
-        users = {name: MockSocket() for name in ("John", "Terry", "Graham", "Eric")}
-        lock = asyncio.Lock()
+        async def increment_with_lock(self):
+            async with self._lock:
+                await self.increment()
 
-        async def user_disconnect(username: str):
-            if use_lock:
-                async with lock:
-                    users.pop(username).closed = True
-            else:
-                users.pop(username).closed = True
+    _counter = Counter()
+    await asyncio.gather(*(_counter.increment() for _ in range(100)))
+    print("without a lock: counter =", _counter.value)
 
-        async def message_all_users():
-            if use_lock:
-                async with lock:
-                    await asyncio.gather(*(sock.send(f"Hello {user}") for user, sock in users.items()))
-            else:
-                await asyncio.gather(*(sock.send(f"Hello {user}") for user, sock in users.items()))
-
-        try:
-            await asyncio.gather(message_all_users(), user_disconnect("Eric"))
-            return f"ok, users left: {list(users)}"
-        except ConnectionError as error:
-            return f"FAILED: {error}"
-
-    print(f"without lock: {await broadcast_demo(use_lock=False)}")
-    print(f"with lock:    {await broadcast_demo(use_lock=True)}")
+    _counter = Counter()
+    await asyncio.gather(*(_counter.increment_with_lock() for _ in range(100)))
+    print("with a lock:    counter =", _counter.value)
     return
 
 
@@ -121,28 +72,38 @@ def _(mo):
     ## Semaphore: at most N at a time
 
     *Listings 11.6, 11.7.* A semaphore limits concurrency, for example to respect an API's limit or to protect a database.
-    The test server counts how many requests were **in flight at once**.
+    `ConcurrencyMeter` runs tasks through a semaphore and records how many were inside at once.
     """)
     return
 
 
 @app.cell
-async def _(aiohttp, asyncio, serve, time):
-    async def get_limited(session: aiohttp.ClientSession, url: str, semaphore: asyncio.Semaphore) -> int:
-        async with semaphore:
-            async with session.get(url) as response:
-                return response.status
+def _(asyncio):
+    class ConcurrencyMeter:
+        def __init__(self, semaphore: asyncio.Semaphore):
+            self.semaphore = semaphore
+            self.inside = 0
+            self.peak = 0
 
-    async with serve() as _base, aiohttp.ClientSession() as _session:
-        for _limit in (10, 50):
-            await _session.post(f"{_base}/stats/reset")
-            _semaphore = asyncio.Semaphore(_limit)
-            _start = time.perf_counter()
-            await asyncio.gather(*(get_limited(_session, f"{_base}/delay?seconds=0.1", _semaphore) for _ in range(200)))
-            _stats = await (await _session.get(f"{_base}/stats")).json()
-            print(
-                f"Semaphore({_limit}): 200 requests in {time.perf_counter() - _start:.2f} s, server saw at most {_stats['max_in_flight']} at once"
-            )
+        async def run(self, tasks: int) -> int:
+            """Run `tasks` tasks through the semaphore and return the most that were inside at once."""
+            await asyncio.gather(*(self._task() for _ in range(tasks)))
+            return self.peak
+
+        async def _task(self):
+            async with self.semaphore:
+                self.inside += 1
+                self.peak = max(self.peak, self.inside)
+                await asyncio.sleep(0.1)  # e.g. an API call
+                self.inside -= 1
+
+    return (ConcurrencyMeter,)
+
+
+@app.cell
+async def _(ConcurrencyMeter, asyncio, timed):
+    with timed("200 tasks through Semaphore(10)"):
+        print("at most at once:", await ConcurrencyMeter(asyncio.Semaphore(10)).run(tasks=200))
     return
 
 
@@ -156,29 +117,15 @@ def _(mo):
 
 
 @app.cell
-async def _(asyncio):
-    async def max_concurrent(semaphore, tasks: int) -> int:
-        state = {"now": 0, "max": 0}
-
-        async def worker():
-            async with semaphore:
-                state["now"] += 1
-                state["max"] = max(state["max"], state["now"])
-                await asyncio.sleep(0.1)
-                state["now"] -= 1
-
-        await asyncio.gather(*(worker() for _ in range(tasks)))
-        return state["max"]
-
+async def _(ConcurrencyMeter, asyncio):
     _semaphore = asyncio.Semaphore(2)
     _semaphore.release()  # a stray release
-    print(f"Semaphore(2) after an extra release lets {await max_concurrent(_semaphore, 5)} in at once")
+    print("Semaphore(2) after an extra release admits", await ConcurrencyMeter(_semaphore).run(tasks=5))
 
-    _bounded = asyncio.BoundedSemaphore(2)
     try:
-        _bounded.release()
-    except ValueError as error:
-        print(f"BoundedSemaphore: ValueError: {error}")
+        asyncio.BoundedSemaphore(2).release()
+    except ValueError as _error:
+        print("BoundedSemaphore:", repr(_error))
     return
 
 
@@ -194,15 +141,16 @@ def _(mo):
 
 
 @app.cell
-async def _(asyncio, time):
-    async def worker(name: str, ready: asyncio.Event, start: float):
-        await ready.wait()
-        print(f"{name} started at {time.perf_counter() - start:.2f} s")
-
+async def _(asyncio, timed):
     _ready = asyncio.Event()
-    _start = time.perf_counter()
-    asyncio.get_running_loop().call_later(1.0, _ready.set)  # e.g. a connection finishes initializing
-    await asyncio.gather(*(worker(f"worker-{i}", _ready, _start) for i in range(3)))
+
+    async def worker(name: str):
+        await _ready.wait()
+        print(name, "started")
+
+    asyncio.get_running_loop().call_later(1, _ready.set)  # e.g. a connection finishes initializing
+    with timed("the workers waited"):
+        await asyncio.gather(worker("A"), worker("B"), worker("C"))
     return
 
 
@@ -210,32 +158,32 @@ async def _(asyncio, time):
 def _(mo):
     mo.md(r"""
     *Listing 11.13.* **Pitfall:** an Event is a flag, not a counter. Calling `set()` while it's already set does nothing,
-    so triggers that arrive while the workers are busy are **lost**. If every trigger must be handled, use a queue (notebook 12).
+    so triggers that arrive while the handler is busy are **lost**. If every trigger must be handled, use a queue (notebook 12).
     """)
     return
 
 
 @app.cell
 async def _(asyncio):
-    _event = asyncio.Event()
-    _handled = {"count": 0}
+    class SlowHandler:
+        def __init__(self):
+            self.trigger = asyncio.Event()
+            self.handled = 0
 
-    async def trigger_every(interval: float, times: int):
-        for _ in range(times):
-            _event.set()
-            await asyncio.sleep(interval)
+        async def run(self):
+            while True:
+                await self.trigger.wait()
+                self.trigger.clear()
+                self.handled += 1
+                await asyncio.sleep(0.5)  # busy: triggers arriving now get merged
 
-    async def slow_handler():
-        while True:
-            await _event.wait()
-            _event.clear()
-            _handled["count"] += 1
-            await asyncio.sleep(0.5)  # busy: triggers arriving now get merged
-
-    _handler = asyncio.create_task(slow_handler())
-    await trigger_every(0.1, 20)
-    _handler.cancel()
-    print(f"triggered 20 times, handled {_handled['count']} times")
+    _handler = SlowHandler()
+    _task = asyncio.create_task(_handler.run())
+    for _ in range(20):
+        _handler.trigger.set()
+        await asyncio.sleep(0.1)
+    _task.cancel()
+    print("triggered 20 times, handled", _handler.handled, "times")
     return
 
 
@@ -246,43 +194,32 @@ def _(mo):
 
     *Listings 11.14, 11.15.* `Condition.wait_for(predicate)` sleeps until the predicate becomes true. It releases the lock
     while waiting and gets woken by `notify_all()`. Here, queries submitted before a connection is ready wait until it
-    reaches `INITIALIZED`, with no polling.
+    is connected, with no polling.
     """)
     return
 
 
 @app.cell
-async def _(Enum, asyncio):
-    class ConnectionState(Enum):
-        WAIT_INIT = 0
-        INITIALIZING = 1
-        INITIALIZED = 2
-
+async def _(asyncio):
     class Connection:
         def __init__(self):
-            self._state = ConnectionState.WAIT_INIT
+            self.ready = False
             self._condition = asyncio.Condition()
 
-        async def initialize(self):
-            await self._change_state(ConnectionState.INITIALIZING)
+        async def connect(self):
             await asyncio.sleep(1)  # connection start-up
-            await self._change_state(ConnectionState.INITIALIZED)
-
-        async def execute(self, query: str):
             async with self._condition:
-                await self._condition.wait_for(lambda: self._state is ConnectionState.INITIALIZED)
-                print(f"running {query!r}")
-
-        async def _change_state(self, state: ConnectionState):
-            async with self._condition:
-                print(f"state: {self._state.name} -> {state.name}")
-                self._state = state
+                self.ready = True
+                print("connected")
                 self._condition.notify_all()
 
+        async def query(self, sql: str):
+            async with self._condition:
+                await self._condition.wait_for(lambda: self.ready)
+                print("running", sql)
+
     _connection = Connection()
-    _queries = [asyncio.create_task(_connection.execute(q)) for q in ("select * from a", "select * from b")]
-    await _connection.initialize()
-    await asyncio.gather(*_queries)
+    await asyncio.gather(_connection.query("select 1"), _connection.query("select 2"), _connection.connect())
     return
 
 

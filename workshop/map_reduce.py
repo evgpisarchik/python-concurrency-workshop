@@ -13,8 +13,6 @@ from workshop.common import DATA_DIR
 NGRAMS_FILE = DATA_DIR / "googlebooks-eng-all-1gram-20120701-a"
 COMMON_WORDS_FILE = Path(__file__).parent / "common" / "common_words.txt"
 
-map_progress = None
-
 
 def partition(data: list, chunk_size: int) -> Iterator[list]:
     for i in range(0, len(data), chunk_size):
@@ -34,18 +32,6 @@ def merge_dictionaries(first: dict[str, int], second: dict[str, int]) -> dict[st
     for key in second:
         merged[key] = merged.get(key, 0) + second[key]
     return merged
-
-
-def init_progress(progress) -> None:
-    global map_progress
-    map_progress = progress
-
-
-def map_frequencies_with_progress(chunk: list[str]) -> dict[str, int]:
-    result = map_frequencies(chunk)
-    with map_progress.get_lock():
-        map_progress.value += 1
-    return result
 
 
 def generate_ngrams(lines: int = 5_000_000) -> Path:

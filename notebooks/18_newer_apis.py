@@ -26,6 +26,7 @@ def _(mo):
 @app.cell
 def _():
     import asyncio
+    import itertools
     import multiprocessing
     import time
     from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
@@ -33,15 +34,18 @@ def _():
     import marimo as mo
 
     from workshop import start_methods
+    from workshop.common import timed
 
     return (
         ProcessPoolExecutor,
         ThreadPoolExecutor,
         asyncio,
+        itertools,
         mo,
         multiprocessing,
         start_methods,
         time,
+        timed,
     )
 
 
@@ -62,21 +66,20 @@ def _(mo):
 
 @app.cell
 async def _(asyncio):
-    async def worker(jobs: asyncio.Queue, done: list):
+    async def worker(jobs: asyncio.Queue) -> list:
+        done = []
         try:
             while True:
                 done.append(await jobs.get())
         except asyncio.QueueShutDown:  # raised once the queue is shut down and empty
-            print("worker stopped by itself")
+            return done
 
     _jobs = asyncio.Queue()
-    _done = []
-    _worker = asyncio.create_task(worker(_jobs, _done))
+    _worker = asyncio.create_task(worker(_jobs))
     for _i in range(5):
         await _jobs.put(_i)
     _jobs.shutdown()  # no more jobs: the worker finishes the queue, then stops
-    await _worker
-    print("jobs done:", _done)
+    print("the worker did these jobs and stopped by itself:", await _worker)
     return
 
 
@@ -133,31 +136,17 @@ def _(mo):
 
     `map()` used to **submit everything immediately**: a generator of 10 million lines became 10 million futures in
     memory before the first result came back. `buffersize=N` keeps at most N tasks in flight and pulls the next input only
-    when a result is consumed. Below, the generator records how many inputs `map` pulled by the time we got the first
-    result.
+    when a result is consumed, so it even works on an **endless** input (without `buffersize` this cell would never
+    finish).
     """)
     return
 
 
 @app.cell
-def _(ThreadPoolExecutor):
-    def inputs_pulled_before_first_result(buffersize):
-        pulled = []
-
-        def numbers():
-            for i in range(100_000):
-                pulled.append(i)
-                yield i
-
-        with ThreadPoolExecutor(4) as pool:
-            results = pool.map(abs, numbers(), buffersize=buffersize)
-            next(results)  # the first result
-            count = len(pulled)
-            list(results)  # the rest
-        return count
-
-    print(f"without buffersize: {inputs_pulled_before_first_result(None):,} inputs pulled")
-    print(f"buffersize=8:       {inputs_pulled_before_first_result(8):,} inputs pulled")
+def _(ThreadPoolExecutor, itertools):
+    with ThreadPoolExecutor(4) as _pool:
+        _results = _pool.map(abs, itertools.count(), buffersize=8)  # an endless input
+        print("first results:", [next(_results) for _ in range(5)])
     return
 
 
@@ -174,16 +163,15 @@ def _(mo):
 
 
 @app.cell
-def _(ProcessPoolExecutor, time):
+def _(ProcessPoolExecutor, time, timed):
     _pool = ProcessPoolExecutor(1)
     _pool.submit(int).result()  # wait until the worker has started
     _job = _pool.submit(time.sleep, 60)
     time.sleep(0.5)  # the job is now running
 
-    _start = time.perf_counter()
-    _pool.terminate_workers()
-    print(repr(_job.exception()))  # waits until the job is finished
-    print(f"a sleep(60) job stopped after {time.perf_counter() - _start:.2f} s")
+    with timed("stopping a running sleep(60)"):
+        _pool.terminate_workers()
+        print(repr(_job.exception()))  # waits until the job is finished
     _pool.shutdown()
     return
 

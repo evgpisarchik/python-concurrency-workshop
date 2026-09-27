@@ -18,23 +18,23 @@ def _(mo):
 @app.cell
 def _():
     import asyncio
-    import logging
-    import threading
-    import time
+    import subprocess
+    import sys
 
     import marimo as mo
     import requests
 
-    from workshop.common import async_timed, delay
+    from workshop.common import async_timed, delay, timed
+    from workshop.cpu import count
 
-    return async_timed, asyncio, delay, logging, mo, requests, threading, time
+    return async_timed, asyncio, count, delay, mo, requests, subprocess, sys, timed
 
 
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
     `delay(seconds)` (book listing 2.6) is our stand-in for slow I/O: it prints, awaits `asyncio.sleep`, and returns
-    the number of seconds. `@async_timed()` (listing 2.16) prints how long a coroutine took.
+    the number of seconds. `timed(label)` prints how long a block took.
 
     ## A coroutine call doesn't run anything
 
@@ -46,14 +46,14 @@ def _(mo):
 
 @app.cell
 async def _():
-    async def coroutine_add_one(number: int) -> int:
+    async def add_one(number: int) -> int:
         return number + 1
 
-    _coroutine = coroutine_add_one(1)
-    print(f"Calling it returns: {_coroutine!r}")
-    _coroutine.close()  # never awaited; close it to silence the "never awaited" warning
+    _coroutine = add_one(1)
+    print("calling it returns:", _coroutine)
+    _coroutine.close()  # never awaited: close it to silence the warning
 
-    print(f"Awaiting it returns: {await coroutine_add_one(1)}")
+    print("awaiting it returns:", await add_one(1))
     return
 
 
@@ -69,11 +69,10 @@ def _(mo):
 
 
 @app.cell
-async def _(delay, time):
-    _start = time.perf_counter()
-    await delay(1)
-    await delay(1)
-    print(f"two awaits in a row: {time.perf_counter() - _start:.2f} s")
+async def _(delay, timed):
+    with timed("two awaits in a row"):
+        await delay(1)
+        await delay(1)
     return
 
 
@@ -82,47 +81,20 @@ def _(mo):
     mo.md(r"""
     ## Tasks run concurrently
 
-    *Listings 2.8, 2.9.* `asyncio.create_task()` schedules a coroutine on the loop **right away** and returns a `Task`.
-    Three 1-second waits take about 1 second in total.
+    *Listings 2.8–2.10.* `asyncio.create_task()` schedules a coroutine on the loop **right away** and returns a `Task`.
+    Two 1-second waits take about 1 second in total, and the current coroutine keeps running while they wait.
     """)
     return
 
 
 @app.cell
-async def _(asyncio, delay, time):
-    _start = time.perf_counter()
-    _tasks = [asyncio.create_task(delay(1)) for _ in range(3)]
-    print(type(_tasks[0]))
-    for _task in _tasks:
-        await _task
-    print(f"three tasks: {time.perf_counter() - _start:.2f} s")
-    return
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    ## Do other work while tasks wait
-
-    *Listing 2.10.* While the delays run in the background, the current coroutine keeps working. Total time is about 3 s, not 5 s.
-    """)
-    return
-
-
-@app.cell
-async def _(asyncio, delay, time):
-    async def hello_every_second():
-        for _ in range(2):
-            await asyncio.sleep(1)
-            print("I'm running other code while I'm waiting!")
-
-    _start = time.perf_counter()
-    _first = asyncio.create_task(delay(3))
-    _second = asyncio.create_task(delay(3))
-    await hello_every_second()
-    await _first
-    await _second
-    print(f"total: {time.perf_counter() - _start:.2f} s")
+async def _(asyncio, delay, timed):
+    with timed("two tasks"):
+        _first = asyncio.create_task(delay(1))
+        _second = asyncio.create_task(delay(1))
+        print("doing other work while the tasks wait")
+        await _first
+        await _second
     return
 
 
@@ -134,7 +106,7 @@ def _(mo):
     *Listings 2.11–2.13.*
 
     * `task.cancel()` raises `CancelledError` inside the task at its next `await`.
-    * `asyncio.wait_for(aw, timeout)` and `async with asyncio.timeout(s)` (3.11+) cancel the work and raise `TimeoutError`.
+    * `async with asyncio.timeout(s)` (3.11+) and `asyncio.wait_for(aw, timeout)` cancel the work and raise `TimeoutError`.
     * `asyncio.shield(task)` lets a timeout fire **without** cancelling the task, for example to warn the user that a
       payment is taking a while but still let it finish.
     """)
@@ -142,33 +114,27 @@ def _(mo):
 
 
 @app.cell
-async def _(asyncio, delay):
-    _long_task = asyncio.create_task(delay(10))
-    await asyncio.sleep(1)
-    _long_task.cancel()
+async def _(asyncio):
+    _task = asyncio.create_task(asyncio.sleep(10))
+    await asyncio.sleep(0.1)
+    _task.cancel()
     try:
-        await _long_task
+        await _task
     except asyncio.CancelledError:
-        print(f"cancelled: {_long_task.cancelled()}")
-
-    _task = asyncio.create_task(delay(2))
-    try:
-        await asyncio.wait_for(_task, timeout=1)
-    except TimeoutError:
-        print(f"wait_for timed out, and the task was cancelled: {_task.cancelled()}")
+        print("task cancelled")
 
     try:
         async with asyncio.timeout(1):
-            await delay(2)
+            await asyncio.sleep(2)
     except TimeoutError:
-        print("asyncio.timeout() fired too")
+        print("timed out after 1 s")
 
-    _task = asyncio.create_task(delay(2))
+    _payment = asyncio.create_task(asyncio.sleep(2, result="payment done"))
     try:
-        _ = await asyncio.wait_for(asyncio.shield(_task), timeout=1)
+        await asyncio.wait_for(asyncio.shield(_payment), timeout=1)
     except TimeoutError:
-        print("Taking longer than 1 s... still waiting (shielded, so not cancelled)")
-        print(f"result: {await _task}")
+        print("taking longer than 1 s, still waiting...")
+        print(await _payment)
     return
 
 
@@ -186,20 +152,12 @@ def _(mo):
 
 @app.cell
 async def _(asyncio):
-    def make_request() -> asyncio.Future:
-        future = asyncio.get_running_loop().create_future()
+    _loop = asyncio.get_running_loop()
+    _future = _loop.create_future()
+    _loop.call_later(1, _future.set_result, 42)  # someone else sets the result in 1 s
 
-        async def set_future_value():
-            await asyncio.sleep(1)
-            future.set_result(42)
-
-        asyncio.create_task(set_future_value())
-        return future
-
-    _future = make_request()
-    print(f"done? {_future.done()}")
-    print(f"value: {await _future}")
-    print(f"done? {_future.done()}")
+    print("done?", _future.done())
+    print("value:", await _future)
     return
 
 
@@ -208,7 +166,8 @@ def _(mo):
     mo.md(r"""
     ## Measuring concurrency with `@async_timed`
 
-    *Listing 2.17.* `main` takes about as long as its slowest task (3 s), not the sum (5 s).
+    *Listings 2.16, 2.17.* `@async_timed()` prints when a coroutine starts and how long it ran. `main` takes about as long
+    as its slowest task (2 s), not the sum (3 s).
     """)
     return
 
@@ -216,18 +175,14 @@ def _(mo):
 @app.cell
 async def _(async_timed, asyncio):
     @async_timed()
-    async def timed_delay(seconds: int) -> int:
+    async def wait(seconds: int):
         await asyncio.sleep(seconds)
-        return seconds
 
     @async_timed()
-    async def timed_main():
-        first = asyncio.create_task(timed_delay(2))
-        second = asyncio.create_task(timed_delay(3))
-        await first
-        await second
+    async def main():
+        await asyncio.gather(wait(1), wait(2))
 
-    await timed_main()
+    await main()
     return
 
 
@@ -237,27 +192,19 @@ def _(mo):
     ## Pitfall 1: CPU-bound code in a coroutine
 
     *Listings 2.18, 2.19.* asyncio has **one** thread. A coroutine that computes without awaiting holds the loop, so the
-    other tasks, including I/O, can't even **start**. The 1 s delay below finishes after about 2.5 s, and every request
-    a server is handling would stall the same way. Fix: move CPU work to processes (notebook 6).
+    other tasks, including I/O, can't even **start**. The 1 s delay below finishes only after the counting is done, and
+    every request a server is handling would stall the same way. Fix: move CPU work to processes (notebook 6).
     """)
     return
 
 
 @app.cell
-async def _(async_timed, asyncio, delay, time):
-    @async_timed()
-    async def cpu_bound_work() -> int:
-        counter = 0
-        for _ in range(60_000_000):
-            counter += 1
-        return counter
+async def _(asyncio, count, delay, timed):
+    async def cpu_work():
+        count(50_000_000)  # no await inside: holds the loop
 
-    _start = time.perf_counter()
-    _cpu_one = asyncio.create_task(cpu_bound_work())
-    _cpu_two = asyncio.create_task(cpu_bound_work())
-    _io_task = asyncio.create_task(delay(1))  # scheduled last: can't start until both CPU tasks finish
-    await asyncio.gather(_io_task, _cpu_one, _cpu_two)
-    print(f"a 1 s delay took {time.perf_counter() - _start:.2f} s in total")
+    with timed("a 1 s delay next to CPU work"):
+        await asyncio.gather(cpu_work(), delay(1))
     return
 
 
@@ -275,14 +222,12 @@ def _(mo):
 
 
 @app.cell
-async def _(async_timed, asyncio, requests, time):
-    @async_timed()
-    async def get_example_status() -> int:
-        return requests.get("https://www.example.com").status_code
+async def _(asyncio, requests, timed):
+    async def get_status() -> int:
+        return requests.get("https://www.example.com").status_code  # blocks the loop
 
-    _start = time.perf_counter()
-    await asyncio.gather(*(asyncio.create_task(get_example_status()) for _ in range(3)))
-    print(f"3 'concurrent' blocking requests: {time.perf_counter() - _start:.2f} s")
+    with timed("3 'concurrent' blocking requests"):
+        await asyncio.gather(get_status(), get_status(), get_status())
     return
 
 
@@ -292,33 +237,15 @@ def _(mo):
     ## Finding blocking code: debug mode
 
     *Listings 2.23, 2.24.* In debug mode (`asyncio.run(main(), debug=True)`, `python -X dev`, or `PYTHONASYNCIODEBUG=1`)
-    asyncio logs every callback that holds the loop longer than `loop.slow_callback_duration` (default 100 ms).
-    The demo runs a separate event loop in a background thread (marimo's own loop is already running) and captures the warnings.
+    asyncio logs every callback that holds the loop longer than 100 ms. `workshop/children/blocking_loop.py` blocks for 200 ms:
     """)
     return
 
 
 @app.cell
-def _(asyncio, logging, threading, time):
-    class _Collect(logging.Handler):
-        def __init__(self):
-            super().__init__()
-            self.messages = []
-
-        def emit(self, record):
-            self.messages.append(record.getMessage())
-
-    async def blocking_main():
-        asyncio.get_running_loop().slow_callback_duration = 0.05
-        time.sleep(0.2)  # blocks the loop for 200 ms
-
-    _handler = _Collect()
-    logging.getLogger("asyncio").addHandler(_handler)
-    _thread = threading.Thread(target=lambda: asyncio.run(blocking_main(), debug=True))
-    _thread.start()
-    _thread.join()
-    logging.getLogger("asyncio").removeHandler(_handler)
-    print("\n".join(_handler.messages))
+def _(subprocess, sys):
+    _result = subprocess.run([sys.executable, "-m", "workshop.children.blocking_loop"], capture_output=True, text=True)
+    print(_result.stderr)
     return
 
 
@@ -333,9 +260,9 @@ def _(mo):
 
 
 @app.cell
-async def _(asyncio, delay):
-    asyncio.get_running_loop().call_soon(lambda: print("called on the next loop iteration"))
-    await delay(1)
+async def _(asyncio):
+    asyncio.get_running_loop().call_soon(print, "called on the next loop iteration")
+    await asyncio.sleep(0)
     return
 
 
@@ -352,22 +279,18 @@ def _(mo):
 
 
 @app.cell
-async def _(asyncio, delay):
-    async def fail_after(seconds: float):
-        await asyncio.sleep(seconds)
-        raise ValueError(f"failed after {seconds}s")
-
-    async with asyncio.TaskGroup() as _tg:
-        _a = _tg.create_task(delay(1))
-        _b = _tg.create_task(delay(2))
-    print(f"results: {_a.result()}, {_b.result()}")
+async def _(asyncio):
+    async def fail():
+        await asyncio.sleep(1)
+        raise ValueError("failed")
 
     try:
         async with asyncio.TaskGroup() as _tg:
-            _slow = _tg.create_task(delay(5))
-            _tg.create_task(fail_after(1))
-    except* ValueError as group:
-        print(f"caught {group.exceptions}; sibling cancelled: {_slow.cancelled()}")
+            _slow = _tg.create_task(asyncio.sleep(5))
+            _tg.create_task(fail())
+    except* ValueError as _group:
+        print("caught", _group.exceptions)
+        print("the slow sibling was cancelled:", _slow.cancelled())
     return
 
 

@@ -1,20 +1,10 @@
-"""Process workers that share memory through multiprocessing.Value / Array."""
+"""Process workers that share memory through multiprocessing.Value."""
 
 shared_counter = None
 
 
 def increment_value(shared_int) -> None:
     shared_int.value = shared_int.value + 1  # read-modify-write: NOT atomic
-
-
-def increment_value_locked(shared_int) -> None:
-    with shared_int.get_lock():
-        shared_int.value = shared_int.value + 1
-
-
-def increment_array(shared_array) -> None:
-    for index, integer in enumerate(shared_array):
-        shared_array[index] = integer + 1
 
 
 def init_counter(counter) -> None:

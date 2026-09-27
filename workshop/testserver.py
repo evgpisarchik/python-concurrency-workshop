@@ -1,86 +1,50 @@
 """A local HTTP server for the notebooks, so demos don't depend on the internet.
 
 Endpoints:
-    GET  /delay?seconds=0.5   answer after a delay (a stand-in for a slow API)
-    GET  /status/{code}       answer with that HTTP status
-    GET  /page/{n}            HTML page linking to 3 child pages (a small site to crawl)
-    GET  /stats               {"in_flight", "max_in_flight", "total"}: see how much concurrency arrived
-    POST /stats/reset
+    GET /delay?seconds=0.5   answer {"slept": 0.5} after that delay (a stand-in for a slow API)
+    GET /page/{n}            HTML page linking to 3 child pages (a small site to crawl)
 
 In an async notebook cell:
-    async with serve() as base_url: ...
-As a separate process (for demos that use blocking clients from threads):
+    base_url = await start()          # runs for the rest of the notebook
+As a separate process (for demos that use blocking clients):
     python -m workshop.testserver --port 8111
 """
 
 import argparse
 import asyncio
-from contextlib import asynccontextmanager
 
 from aiohttp import web
 
 MAX_PAGES = 40
 
 
+async def delay(request: web.Request) -> web.Response:
+    seconds = float(request.query.get("seconds", 0))
+    await asyncio.sleep(seconds)
+    return web.json_response({"slept": seconds})
+
+
+async def page(request: web.Request) -> web.Response:
+    n = int(request.match_info["n"])
+    children = [child for child in (3 * n + 1, 3 * n + 2, 3 * n + 3) if child < MAX_PAGES]
+    links = " ".join(f'<a href="/page/{child}">page {child}</a>' for child in children)
+    await asyncio.sleep(0.05)
+    return web.Response(text=f"<html><body><h1>Page {n}</h1>{links}</body></html>", content_type="text/html")
+
+
 def make_app() -> web.Application:
-    stats = {"in_flight": 0, "max_in_flight": 0, "total": 0}
-
-    @web.middleware
-    async def track(request, handler):
-        if request.path.startswith("/stats"):
-            return await handler(request)
-        stats["in_flight"] += 1
-        stats["total"] += 1
-        stats["max_in_flight"] = max(stats["max_in_flight"], stats["in_flight"])
-        try:
-            return await handler(request)
-        finally:
-            stats["in_flight"] -= 1
-
-    async def delay(request):
-        seconds = float(request.query.get("seconds", 0))
-        await asyncio.sleep(seconds)
-        return web.json_response({"slept": seconds})
-
-    async def status(request):
-        code = int(request.match_info["code"])
-        return web.json_response({"status": code}, status=code)
-
-    async def page(request):
-        n = int(request.match_info["n"])
-        children = [c for c in (3 * n + 1, 3 * n + 2, 3 * n + 3) if c < MAX_PAGES]
-        links = "".join(f'<a href="/page/{c}">page {c}</a> ' for c in children)
-        await asyncio.sleep(0.05)
-        return web.Response(text=f"<html><body><h1>Page {n}</h1>{links}</body></html>", content_type="text/html")
-
-    async def get_stats(request):
-        return web.json_response(stats)
-
-    async def reset_stats(request):
-        stats.update(in_flight=0, max_in_flight=0, total=0)
-        return web.json_response(stats)
-
-    app = web.Application(middlewares=[track])
+    app = web.Application()
     app.router.add_get("/delay", delay)
-    app.router.add_get("/status/{code}", status)
     app.router.add_get("/page/{n}", page)
-    app.router.add_get("/stats", get_stats)
-    app.router.add_post("/stats/reset", reset_stats)
     return app
 
 
-@asynccontextmanager
-async def serve(port: int = 0):
-    """Run the test server on the current event loop; yields its base URL."""
+async def start(port: int = 0) -> str:
+    """Start the test server on the running event loop and return its base URL. It runs until the loop stops."""
     runner = web.AppRunner(make_app(), access_log=None)
     await runner.setup()
-    site = web.TCPSite(runner, "127.0.0.1", port)
-    await site.start()
-    actual_port = runner.addresses[0][1]
-    try:
-        yield f"http://127.0.0.1:{actual_port}"
-    finally:
-        await runner.cleanup()
+    await web.TCPSite(runner, "127.0.0.1", port).start()
+    return f"http://127.0.0.1:{runner.addresses[0][1]}"
 
 
 if __name__ == "__main__":

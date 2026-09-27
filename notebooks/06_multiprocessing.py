@@ -23,14 +23,14 @@ def _():
     import asyncio
     import functools
     import multiprocessing
-    import time
     from collections import Counter
     from concurrent.futures import ProcessPoolExecutor, as_completed
 
     import marimo as mo
 
     from workshop import map_reduce, shared_memory
-    from workshop.cpu import count, timed_count
+    from workshop.common import timed
+    from workshop.cpu import count
     from workshop.nb import gate
 
     return (
@@ -45,8 +45,7 @@ def _():
         mo,
         multiprocessing,
         shared_memory,
-        time,
-        timed_count,
+        timed,
     )
 
 
@@ -55,25 +54,21 @@ def _(mo):
     mo.md(r"""
     ## Parallel processes
 
-    *Listings 6.1, 6.4.* Two CPU-bound jobs: one after another, then in two processes (each reports its pid).
+    *Listings 6.1, 6.4.* Two CPU-bound jobs, one after another, then in a pool of processes.
     """)
     return
 
 
 @app.cell
-def _(ProcessPoolExecutor, count, time, timed_count):
-    _jobs = [30_000_000, 60_000_000]
-
-    _start = time.perf_counter()
-    for _n in _jobs:
-        count(_n)
-    print(f"sequential: {time.perf_counter() - _start:.2f} s")
+def _(ProcessPoolExecutor, count, timed):
+    with timed("sequential"):
+        count(30_000_000)
+        count(30_000_000)
 
     with ProcessPoolExecutor() as _pool:
-        _start = time.perf_counter()
-        for _pid, _n, _secs in _pool.map(timed_count, _jobs):
-            print(f"  pid {_pid} counted to {_n:,} in {_secs:.2f} s")
-        print(f"2 processes: {time.perf_counter() - _start:.2f} s  (≈ the slowest job, not the sum)")
+        list(_pool.map(count, [30_000_000, 30_000_000]))  # the first run also starts the workers, so time the second
+        with timed("2 processes"):
+            list(_pool.map(count, [30_000_000, 30_000_000]))
     return
 
 
@@ -89,17 +84,17 @@ def _(mo):
 
 
 @app.cell
-def _(count, multiprocessing, time):
-    with multiprocessing.Pool() as _pool:
-        _start = time.perf_counter()
-        _pool.apply(count, (30_000_000,))
-        _pool.apply(count, (30_000_000,))
-        print(f"apply x2:       {time.perf_counter() - _start:.2f} s")
+def _(count, multiprocessing, timed):
+    with multiprocessing.Pool(2) as _pool:
+        with timed("apply x2"):
+            _pool.apply(count, (30_000_000,))
+            _pool.apply(count, (30_000_000,))
 
-        _start = time.perf_counter()
-        _handles = [_pool.apply_async(count, (30_000_000,)) for _ in range(2)]
-        [_h.get() for _h in _handles]
-        print(f"apply_async x2: {time.perf_counter() - _start:.2f} s")
+        with timed("apply_async x2"):
+            _first = _pool.apply_async(count, (30_000_000,))
+            _second = _pool.apply_async(count, (30_000_000,))
+            _first.get()
+            _second.get()
     return
 
 
@@ -115,16 +110,11 @@ def _(mo):
 
 
 @app.cell
-def _(ProcessPoolExecutor, as_completed, count, time):
-    _numbers = [100_000_000, 1, 3, 5]
+def _(ProcessPoolExecutor, as_completed, count):
+    _jobs = [100_000_000, 1, 3]
     with ProcessPoolExecutor() as _pool:
-        _start = time.perf_counter()
-        for _result in _pool.map(count, _numbers):
-            print(f"map:          {_result:>11,} at {time.perf_counter() - _start:.2f} s")
-
-        _start = time.perf_counter()
-        for _future in as_completed([_pool.submit(count, _n) for _n in _numbers]):
-            print(f"as_completed: {_future.result():>11,} at {time.perf_counter() - _start:.2f} s")
+        print("map:         ", list(_pool.map(count, _jobs)))
+        print("as_completed:", [f.result() for f in as_completed(_pool.submit(count, n) for n in _jobs)])
     return
 
 
@@ -134,30 +124,25 @@ def _(mo):
     ## Processes from asyncio: `run_in_executor`
 
     *Listing 6.5.* `loop.run_in_executor(process_pool, fn, *args)` returns an awaitable, so gather / wait / as_completed all
-    work with it, and the event loop stays free. The ticker below keeps ticking while four CPU jobs run in other processes.
+    work with it, and the event loop stays free while the processes compute.
     """)
     return
 
 
 @app.cell
-async def _(ProcessPoolExecutor, asyncio, count, time):
-    async def ticker(stop: asyncio.Event):
-        ticks = 0
-        while not stop.is_set():
-            await asyncio.sleep(0.1)
-            ticks += 1
-        return ticks
+async def _(ProcessPoolExecutor, asyncio, count):
+    async def still_responsive():
+        await asyncio.sleep(0.1)
+        print("the event loop is still free")
 
-    _stop = asyncio.Event()
-    _ticker = asyncio.create_task(ticker(_stop))
     _loop = asyncio.get_running_loop()
     with ProcessPoolExecutor() as _pool:
-        _start = time.perf_counter()
-        _results = await asyncio.gather(*(_loop.run_in_executor(_pool, count, 40_000_000) for _ in range(4)))
-    _stop.set()
-    print(
-        f"4 CPU jobs done in {time.perf_counter() - _start:.2f} s; the event loop ticked {await _ticker} times meanwhile"
-    )
+        _results = await asyncio.gather(
+            _loop.run_in_executor(_pool, count, 40_000_000),
+            _loop.run_in_executor(_pool, count, 40_000_000),
+            still_responsive(),
+        )
+    print(_results)
     return
 
 
@@ -173,10 +158,9 @@ def _(mo):
 
 @app.cell
 def _(Counter, functools, map_reduce):
-    _lines = ["I know what I know", "I know that I know", "I don't know much", "They don't know much"]
-    _mapped = [dict(Counter(_line.split())) for _line in _lines]
-    for _m in _mapped:
-        print("map   :", _m)
+    _lines = ["I know what I know", "I know that I know", "I don't know much"]
+    _mapped = [dict(Counter(line.split())) for line in _lines]
+    print("map:   ", _mapped)
     print("reduce:", functools.reduce(map_reduce.merge_dictionaries, _mapped))
     return
 
@@ -184,91 +168,47 @@ def _(Counter, functools, map_reduce):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    *Listings 6.7–6.9.* Word frequencies over a Google Books style 1-gram file (a synthetic one is generated on first run). We compare:
-    one process, a parallel map with a single-process reduce, and a parallel map plus a parallel reduce.
+    *Listings 6.7, 6.8.* Word frequencies over a Google Books style 1-gram file (a synthetic one is generated on first run):
+    one process vs a process pool that maps chunks in parallel.
+
+    Chunk size matters. Chunks that are too small spend their time pickling data between processes, and chunks that are
+    too large leave cores idle.
     """)
     return
 
 
 @app.cell
 def _(map_reduce):
-    if not map_reduce.NGRAMS_FILE.exists():
-        map_reduce.generate_ngrams(2_000_000)
     ngram_lines = map_reduce.read_ngrams()
     print(f"{len(ngram_lines):,} lines loaded")
     return (ngram_lines,)
 
 
 @app.cell
-async def _(
-    ProcessPoolExecutor,
-    asyncio,
-    functools,
-    map_reduce,
-    ngram_lines,
-    time,
-):
-    async def parallel_reduce(loop, pool, counters: list[dict], chunk_size: int) -> dict:
-        chunks = list(map_reduce.partition(counters, chunk_size))
-        while len(chunks[0]) > 1:
-            reducers = [
-                loop.run_in_executor(pool, functools.reduce, map_reduce.merge_dictionaries, chunk) for chunk in chunks
-            ]
-            chunks = list(map_reduce.partition(await asyncio.gather(*reducers), chunk_size))
-        return chunks[0][0]
+def _(ProcessPoolExecutor, functools, map_reduce, ngram_lines, timed):
+    class WordCounter:
+        def __init__(self, lines: list[str]):
+            self.lines = lines
 
-    _start = time.perf_counter()
-    _single = map_reduce.map_frequencies(ngram_lines)
-    print(f"single process:               {time.perf_counter() - _start:.2f} s  Aardvark={_single['Aardvark']:,}")
+        def in_one_process(self) -> dict:
+            return map_reduce.map_frequencies(self.lines)
 
-    _loop = asyncio.get_running_loop()
+        def in_pool(self, pool, chunk_size: int) -> dict:
+            chunks = map_reduce.partition(self.lines, chunk_size)
+            partials = pool.map(map_reduce.map_frequencies, chunks)  # map: in parallel
+            return functools.reduce(map_reduce.merge_dictionaries, partials)  # reduce: here
+
+    _counter = WordCounter(ngram_lines)
+    with timed("one process"):
+        _counter.in_one_process()
+
     with ProcessPoolExecutor() as _pool:
-        _start = time.perf_counter()
-        _partials = await asyncio.gather(
-            *(
-                _loop.run_in_executor(_pool, map_reduce.map_frequencies, c)
-                for c in map_reduce.partition(ngram_lines, 60_000)
-            )
-        )
-        _result = functools.reduce(map_reduce.merge_dictionaries, _partials)
-        print(
-            f"parallel map ({len(_partials)} chunks):     {time.perf_counter() - _start:.2f} s  Aardvark={_result['Aardvark']:,}"
-        )
-
-        _start = time.perf_counter()
-        _partials = await asyncio.gather(
-            *(
-                _loop.run_in_executor(_pool, map_reduce.map_frequencies, c)
-                for c in map_reduce.partition(ngram_lines, 60_000)
-            )
-        )
-        _result = await parallel_reduce(_loop, _pool, _partials, 8)
-        print(f"parallel map + reduce:        {time.perf_counter() - _start:.2f} s  Aardvark={_result['Aardvark']:,}")
-    return
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    Chunk size matters. Chunks that are too small spend their time pickling data between processes, and chunks that are
-    too large leave cores idle:
-    """)
-    return
-
-
-@app.cell
-async def _(ProcessPoolExecutor, asyncio, map_reduce, ngram_lines, time):
-    _loop = asyncio.get_running_loop()
-    with ProcessPoolExecutor() as _pool:
-        for _size in (1_000, 60_000, len(ngram_lines) // 2):
-            _start = time.perf_counter()
-            await asyncio.gather(
-                *(
-                    _loop.run_in_executor(_pool, map_reduce.map_frequencies, c)
-                    for c in map_reduce.partition(ngram_lines, _size)
-                )
-            )
-            print(f"chunk size {_size:>9,}: {time.perf_counter() - _start:.2f} s")
+        with timed("pool, chunks of 1,000"):
+            _counter.in_pool(_pool, 1_000)
+        with timed("pool, chunks of 60,000"):
+            _counter.in_pool(_pool, 60_000)
+        with timed("pool, 2 huge chunks"):
+            _counter.in_pool(_pool, len(ngram_lines) // 2)
     return
 
 
@@ -277,24 +217,19 @@ def _(mo):
     mo.md(r"""
     ## Shared memory and race conditions
 
-    *Listing 6.10.* Processes don't share objects. `multiprocessing.Value` / `Array` place a C value in **shared memory** that every process can see.
+    *Listing 6.10.* Processes don't share objects. `multiprocessing.Value` / `Array` place a C value in **shared memory**
+    that every process can see.
     """)
     return
 
 
 @app.cell
 def _(multiprocessing, shared_memory):
-    _integer = multiprocessing.Value("i", 0)
-    _array = multiprocessing.Array("i", [0, 0])
-    _procs = [
-        multiprocessing.Process(target=shared_memory.increment_value, args=(_integer,)),
-        multiprocessing.Process(target=shared_memory.increment_array, args=(_array,)),
-    ]
-    for _p in _procs:
-        _p.start()
-    for _p in _procs:
-        _p.join()
-    print(f"Value: {_integer.value}, Array: {_array[:]}")
+    _number = multiprocessing.Value("i", 0)
+    _process = multiprocessing.Process(target=shared_memory.increment_value, args=(_number,))
+    _process.start()
+    _process.join()
+    print("the child incremented the shared value to", _number.value)
     return
 
 
@@ -302,28 +237,24 @@ def _(multiprocessing, shared_memory):
 def _(mo):
     mo.md(r"""
     *Listings 6.11, 6.12.* `value += 1` is **read → add → write**. When two processes interleave, increments get lost.
-    Holding the Value's lock makes the update atomic, at the cost of speed. Keep critical sections small.
+    Holding the Value's lock makes the update atomic.
     """)
     return
 
 
 @app.cell
-def _(multiprocessing, shared_memory, time):
-    def run_two_incrementers(target, times: int) -> tuple[int, float]:
-        shared = multiprocessing.Value("i", 0)
-        procs = [multiprocessing.Process(target=target, args=(shared, times)) for _ in range(2)]
-        start = time.perf_counter()
-        for p in procs:
-            p.start()
-        for p in procs:
-            p.join()
-        return shared.value, time.perf_counter() - start
+def _(multiprocessing, shared_memory):
+    def run_in_two_processes(target) -> int:
+        number = multiprocessing.Value("i", 0)
+        processes = [multiprocessing.Process(target=target, args=(number, 100_000)) for _ in range(2)]
+        for process in processes:
+            process.start()
+        for process in processes:
+            process.join()
+        return number.value
 
-    _value, _secs = run_two_incrementers(shared_memory.increment_many, 100_000)
-    print(f"no lock:   expected 200,000, got {_value:,}  ({_secs:.2f} s)")
-
-    _value, _secs = run_two_incrementers(shared_memory.increment_many_locked, 100_000)
-    print(f"with lock: expected 200,000, got {_value:,}  ({_secs:.2f} s)")
+    print(f"no lock:   {run_in_two_processes(shared_memory.increment_many):,} of 200,000")
+    print(f"with lock: {run_in_two_processes(shared_memory.increment_many_locked):,} of 200,000")
     return
 
 
@@ -338,45 +269,11 @@ def _(mo):
 
 @app.cell
 def _(ProcessPoolExecutor, multiprocessing, shared_memory):
-    _counter = multiprocessing.Value("d", 0)
+    _counter = multiprocessing.Value("i", 0)
     with ProcessPoolExecutor(initializer=shared_memory.init_counter, initargs=(_counter,)) as _pool:
-        _futures = [_pool.submit(shared_memory.increment_shared_counter) for _ in range(10)]
-        [_f.result() for _f in _futures]
-    print(f"counter after 10 increments in pool workers: {_counter.value}")
-    return
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    *Listing 6.14.* The same trick gives **live progress**: workers bump a shared counter, and an asyncio task in this process reports it while we await the pool.
-    """)
-    return
-
-
-@app.cell
-async def _(
-    ProcessPoolExecutor,
-    asyncio,
-    map_reduce,
-    multiprocessing,
-    ngram_lines,
-):
-    async def progress_reporter(progress, total: int):
-        while progress.value < total:
-            print(f"finished {progress.value}/{total} map operations")
-            await asyncio.sleep(0.2)
-
-    _progress = multiprocessing.Value("i", 0)
-    _chunks = list(map_reduce.partition(ngram_lines, 20_000))
-    _loop = asyncio.get_running_loop()
-    with ProcessPoolExecutor(initializer=map_reduce.init_progress, initargs=(_progress,)) as _pool:
-        _reporter = asyncio.create_task(progress_reporter(_progress, len(_chunks)))
-        _partials = await asyncio.gather(
-            *(_loop.run_in_executor(_pool, map_reduce.map_frequencies_with_progress, c) for c in _chunks)
-        )
-        await _reporter
-    print(f"done: {len(_partials)}/{len(_chunks)}")
+        for _ in range(10):
+            _pool.submit(shared_memory.increment_shared_counter)
+    print("counter after 10 increments in pool workers:", _counter.value)
     return
 
 
@@ -400,17 +297,12 @@ def _(mo):
 
 
 @app.cell
-async def _(ProcessPoolExecutor, asyncio, gate, loops_button, time):
+def _(ProcessPoolExecutor, gate, loops_button, timed):
     gate(loops_button)
     from workshop.db_workers import query_products_in_new_loop
 
-    _loop = asyncio.get_running_loop()
-    with ProcessPoolExecutor() as _pool:
-        _start = time.perf_counter()
-        _counts = await asyncio.gather(
-            *(_loop.run_in_executor(_pool, query_products_in_new_loop, 10_000) for _ in range(5))
-        )
-    print(f"{sum(_counts):,} queries from 5 processes (5 event loops) in {time.perf_counter() - _start:.2f} s")
+    with ProcessPoolExecutor(5) as _pool, timed("5 processes x 10,000 queries"):
+        list(_pool.map(query_products_in_new_loop, [10_000] * 5))
     return
 
 

@@ -25,19 +25,17 @@ def _():
     from concurrent.futures import ThreadPoolExecutor
 
     import marimo as mo
-    import numpy as np
     import requests
 
+    from workshop.common import timed
     from workshop.cpu import hash_password
-    from workshop.nb import Timeline, start_server, stop_server
+    from workshop.nb import start_server, stop_server
 
     return (
         ThreadPoolExecutor,
-        Timeline,
         asyncio,
         hash_password,
         mo,
-        np,
         os,
         requests,
         socket,
@@ -45,6 +43,7 @@ def _():
         stop_server,
         threading,
         time,
+        timed,
     )
 
 
@@ -53,110 +52,61 @@ def _(mo):
     mo.md(r"""
     ## Thread per connection
 
-    *Listings 7.1, 7.2.* The simplest way to make blocking code concurrent is to give each client its own thread, so a blocked
-    `recv()` only blocks that thread. Python can't kill threads, so shutting down means making each thread **exit by itself**:
-    `socket.shutdown()` makes the blocked `recv()` return `b"\"`.
+    *Listings 7.1, 7.2.* The simplest way to make blocking code concurrent is to give each connection its own thread, so a
+    blocked `recv()` only blocks that thread. Python can't kill threads, so shutting down means making each thread **exit
+    by itself**: `socket.shutdown()` makes the blocked `recv()` return `b""`.
     """)
     return
 
 
 @app.cell
-def _(Timeline, socket, threading):
-    class ClientEchoThread(threading.Thread):
-        def __init__(self, client: socket.socket, timeline: Timeline):
-            super().__init__(name=f"client-thread-{client.getpeername()[1]}")
-            self.client, self.timeline = client, timeline
+def _(socket, threading):
+    def echo(connection: socket.socket):
+        while data := connection.recv(1024):  # blocks only this thread
+            connection.sendall(data)
 
-        def run(self):
-            while data := self.client.recv(2048):  # blocks only this thread
-                self.client.sendall(data)
-            self.timeline.log("recv() returned b'': thread exits")
-
-        def close(self):
-            self.client.shutdown(socket.SHUT_RDWR)  # unblocks recv() in run()
-
-    _timeline = Timeline()
-    _server = socket.create_server(("127.0.0.1", 8701))
-    _clients = [socket.create_connection(("127.0.0.1", 8701)) for _ in range(3)]
-    _threads = []
-    for _ in _clients:
-        _connection, _ = _server.accept()
-        _thread = ClientEchoThread(_connection, _timeline)
-        _thread.start()
-        _threads.append(_thread)
-
-    for _i, _c in enumerate(_clients):
-        _c.sendall(f"hello {_i}".encode())
-        _timeline.log(f"client {_i} got {_c.recv(100)!r}")
-
-    _timeline.log("shutting down")
+    _connections = [socket.socketpair() for _ in range(3)]  # (server side, client side)
+    _threads = [threading.Thread(target=echo, args=(server_side,)) for server_side, _ in _connections]
     for _thread in _threads:
-        _thread.close()
+        _thread.start()
+
+    for _i, (_, _client_side) in enumerate(_connections):
+        _client_side.sendall(f"hello {_i}".encode())
+        print(_client_side.recv(1024))
+
+    for _server_side, _ in _connections:
+        _server_side.shutdown(socket.SHUT_RDWR)  # recv() returns b"": the thread exits
+    for _thread in _threads:
         _thread.join()
-    for _c in _clients:
-        _c.close()
-    _server.close()
-    _timeline.show()
+    print("all threads finished")
     return
 
 
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## A blocking library, five ways
+    ## A blocking library from threads
 
-    *Listings 7.3–7.7.* 50 blocking `requests.get` calls to an endpoint that takes 0.2 s:
-
-    * sequential
-    * `ThreadPoolExecutor.map`, without asyncio
-    * `loop.run_in_executor(pool, ...)` from async code, with our own pool
-    * `run_in_executor(None, ...)`: the loop's **default** pool, `min(32, cpu_count + 4)` threads
-    * `asyncio.to_thread(fn, *args)`, the recommended one-liner (also uses the default pool)
+    *Listings 7.3–7.7.* 20 blocking `requests.get` calls to an endpoint that takes 0.2 s: one by one, on a thread pool, and
+    with `asyncio.to_thread(fn, *args)`, the recommended way to call blocking code from async code. (`to_thread` uses
+    the loop's default pool of `min(32, cpu_count + 4)` threads; `loop.run_in_executor(pool, ...)` takes your own pool.)
     """)
     return
 
 
 @app.cell
-async def _(
-    ThreadPoolExecutor,
-    asyncio,
-    mo,
-    os,
-    requests,
-    start_server,
-    stop_server,
-    time,
-):
+async def _(ThreadPoolExecutor, asyncio, requests, start_server, stop_server, timed):
     _server = start_server(["-m", "workshop.testserver", "--port", "8702"], 8702)
-    _url = "http://127.0.0.1:8702/delay?seconds=0.2"
+    _urls = ["http://127.0.0.1:8702/delay?seconds=0.2"] * 20
 
-    def get_status_code(url: str) -> int:
-        return requests.get(url).status_code
+    with timed("one by one"):
+        [requests.get(url) for url in _urls]
 
-    _start = time.perf_counter()
-    [get_status_code(_url) for _ in range(50)]
-    print(f"sequential:                      {time.perf_counter() - _start:.2f} s")
+    with ThreadPoolExecutor(20) as _pool, timed("ThreadPoolExecutor"):
+        list(_pool.map(requests.get, _urls))
 
-    with ThreadPoolExecutor(max_workers=50) as _pool:
-        _start = time.perf_counter()
-        list(_pool.map(get_status_code, [_url] * 50))
-        print(f"ThreadPoolExecutor(50).map:      {time.perf_counter() - _start:.2f} s")
-
-    _loop = asyncio.get_running_loop()
-    with ThreadPoolExecutor(max_workers=50) as _pool:
-        _start = time.perf_counter()
-        await asyncio.gather(*(_loop.run_in_executor(_pool, get_status_code, _url) for _ in range(50)))
-        print(f"run_in_executor(own pool of 50): {time.perf_counter() - _start:.2f} s")
-
-    _start = time.perf_counter()
-    await asyncio.gather(*(_loop.run_in_executor(None, get_status_code, _url) for _ in range(50)))
-    print(
-        f"run_in_executor(None):           {time.perf_counter() - _start:.2f} s  (default pool of {min(32, os.cpu_count() + 4)})"
-    )
-
-    _start = time.perf_counter()
-    await asyncio.gather(*(asyncio.to_thread(get_status_code, _url) for _ in range(50)))
-    print(f"asyncio.to_thread:               {time.perf_counter() - _start:.2f} s  (default pool too)")
+    with timed("asyncio.to_thread"):
+        await asyncio.gather(*(asyncio.to_thread(requests.get, url) for url in _urls))
 
     stop_server(_server)
     return
@@ -167,36 +117,27 @@ def _(mo):
     mo.md(r"""
     ## Shared state needs a lock
 
-    *Listing 7.8.* Many threads update a counter while an asyncio task reports progress. `counter += 1` is read-modify-write,
-    so it is guarded with `threading.Lock`. (asyncio locks are **not** thread-safe. Use the `threading` ones for threads.)
+    *Listing 7.8.* 100 threads each count a finished job. `done += 1` is read-modify-write, so it is guarded with
+    `threading.Lock`. (asyncio locks are **not** thread-safe. Use the `threading` ones for threads.)
     """)
     return
 
 
 @app.cell
-async def _(asyncio, requests, start_server, stop_server, threading):
-    _server = start_server(["-m", "workshop.testserver", "--port", "8703"], 8703)
-    _counter_lock = threading.Lock()
-    _state = {"done": 0}
+async def _(asyncio, threading, time):
+    class JobCounter:
+        def __init__(self):
+            self.done = 0
+            self._lock = threading.Lock()
 
-    def get_and_count(url: str) -> int:
-        status = requests.get(url).status_code
-        with _counter_lock:
-            _state["done"] += 1
-        return status
+        def run_job(self):
+            time.sleep(0.1)  # blocking work
+            with self._lock:
+                self.done += 1
 
-    async def reporter(total: int):
-        while _state["done"] < total:
-            print(f"finished {_state['done']}/{total} requests")
-            await asyncio.sleep(0.25)
-
-    _reporter = asyncio.create_task(reporter(100))
-    await asyncio.gather(
-        *(asyncio.to_thread(get_and_count, "http://127.0.0.1:8703/delay?seconds=0.2") for _ in range(100))
-    )
-    await _reporter
-    print(f"finished {_state['done']}/100 requests")
-    stop_server(_server)
+    _counter = JobCounter()
+    await asyncio.gather(*(asyncio.to_thread(_counter.run_job) for _ in range(100)))
+    print("jobs done:", _counter.done)
     return
 
 
@@ -205,34 +146,22 @@ def _(mo):
     mo.md(r"""
     ## Re-entrant locks and deadlocks
 
-    *Listings 7.9, 7.10.* A function that takes a lock and then calls code that takes the **same** lock blocks forever with
-    `Lock`. `RLock` lets the thread that already owns the lock acquire it again.
+    *Listings 7.9, 7.10.* A thread that holds a `Lock` and tries to take it again (for example, a recursive function)
+    waits for itself forever. `RLock` lets the thread that already owns the lock acquire it again.
     """)
     return
 
 
 @app.cell
 def _(threading):
-    def make_recursive_sum(lock):
-        def sum_list(values: list[int]) -> int:
-            with lock:
-                if not values:
-                    return 0
-                head, *tail = values
-                return head + sum_list(tail)  # acquires the same lock again
+    _lock = threading.Lock()
+    with _lock:
+        print("Lock:  acquired again by the same thread?", _lock.acquire(timeout=0.5))  # would wait forever
 
-        return sum_list
-
-    def try_recursive_sum(lock) -> str:
-        result = {}
-        sum_list = make_recursive_sum(lock)
-        thread = threading.Thread(target=lambda: result.update(value=sum_list([1, 2, 3, 4])), daemon=True)
-        thread.start()
-        thread.join(timeout=1)
-        return "stuck (deadlocked on itself)" if thread.is_alive() else f"sum = {result['value']}"
-
-    print(f" Lock: {try_recursive_sum(threading.Lock())}")
-    print(f"RLock: {try_recursive_sum(threading.RLock())}")
+    _rlock = threading.RLock()
+    with _rlock:
+        print("RLock: acquired again by the same thread?", _rlock.acquire(timeout=0.5))
+        _rlock.release()
     return
 
 
@@ -247,31 +176,26 @@ def _(mo):
 
 @app.cell
 def _(threading, time):
-    def deadlock_demo(ordered: bool) -> str:
+    def take_both(first: threading.Lock, second: threading.Lock):
+        with first:
+            time.sleep(0.2)
+            with second:
+                pass
+
+    def deadlocks(same_order: bool) -> bool:
         lock_a, lock_b = threading.Lock(), threading.Lock()
+        thread_1 = threading.Thread(target=take_both, args=(lock_a, lock_b), daemon=True)
+        thread_2 = threading.Thread(
+            target=take_both, args=(lock_a, lock_b) if same_order else (lock_b, lock_a), daemon=True
+        )
+        thread_1.start()
+        thread_2.start()
+        thread_1.join(timeout=1)
+        thread_2.join(timeout=1)
+        return thread_1.is_alive()  # still waiting after 1 s
 
-        def first():
-            with lock_a:
-                time.sleep(0.2)
-                with lock_b:
-                    pass
-
-        def second():
-            locks = (lock_a, lock_b) if ordered else (lock_b, lock_a)
-            with locks[0]:
-                time.sleep(0.2)
-                with locks[1]:
-                    pass
-
-        threads = [threading.Thread(target=first, daemon=True), threading.Thread(target=second, daemon=True)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join(timeout=1)
-        return "DEADLOCK" if any(t.is_alive() for t in threads) else "finished"
-
-    print(f"opposite lock order: {deadlock_demo(ordered=False)}")
-    print(f"same lock order:     {deadlock_demo(ordered=True)}")
+    print("opposite lock order, deadlocked:", deadlocks(same_order=False))
+    print("same lock order, deadlocked:    ", deadlocks(same_order=True))
     return
 
 
@@ -284,7 +208,7 @@ def _(mo):
     code from them, run an event loop **forever in a background thread** and send work to it thread-safely:
 
     * `asyncio.run_coroutine_threadsafe(coro, loop)` returns a `concurrent.futures.Future` you can wait on from sync code
-    * `loop.call_soon_threadsafe(callback)` schedules a callback on the loop's thread (for example, to cancel)
+    * `loop.call_soon_threadsafe(callback)` schedules a callback on the loop's thread
 
     Never touch loop objects or GUI widgets from the wrong thread. Pass messages instead.
     """)
@@ -292,28 +216,18 @@ def _(mo):
 
 
 @app.cell
-def _(asyncio, threading, time):
-    _bg_loop = asyncio.new_event_loop()
-    _bg_thread = threading.Thread(target=_bg_loop.run_forever, name="asyncio-thread", daemon=True)
-    _bg_thread.start()
+def _(asyncio, threading):
+    _loop = asyncio.new_event_loop()
+    _thread = threading.Thread(target=_loop.run_forever)
+    _thread.start()
 
-    async def fetch_many(n: int) -> list[float]:
-        results = await asyncio.gather(*(asyncio.sleep(0.5, result=i) for i in range(n)))
-        return results
+    # From here on this is "sync" code, e.g. a button click handler in a GUI
+    _future = asyncio.run_coroutine_threadsafe(asyncio.sleep(0.5, result="done on the asyncio thread"), _loop)
+    print(_future.result())  # blocks this thread until the coroutine finishes
 
-    # --- from here on this is "sync" code, e.g. a button click handler in a GUI ---
-    _future = asyncio.run_coroutine_threadsafe(fetch_many(100), _bg_loop)
-    print(f"submitted from {threading.current_thread().name}; waiting for the result...")
-    print(f"got {len(_future.result(timeout=5))} results from the asyncio thread")
-
-    _slow = asyncio.run_coroutine_threadsafe(asyncio.sleep(60), _bg_loop)
-    _bg_loop.call_soon_threadsafe(_slow.cancel)  # e.g. a "Cancel" button
-    time.sleep(0.1)
-    print(f"cancelled from another thread: {_slow.cancelled()}")
-
-    _bg_loop.call_soon_threadsafe(_bg_loop.stop)
-    _bg_thread.join()
-    _bg_loop.close()
+    _loop.call_soon_threadsafe(_loop.stop)
+    _thread.join()
+    _loop.close()
     return
 
 
@@ -322,37 +236,21 @@ def _(mo):
     mo.md(r"""
     ## C extensions that release the GIL run in parallel on threads
 
-    *Listings 7.16–7.19.* `hashlib.scrypt` and most numpy operations release the GIL, so threads speed them up with no
+    *Listings 7.16–7.19.* `hashlib.scrypt` (and most numpy operations) release the GIL, so threads speed them up with no
     process start-up and no pickling.
     """)
     return
 
 
 @app.cell
-def _(ThreadPoolExecutor, hash_password, np, os, time):
-    _passwords = [os.urandom(10) for _ in range(2_000)]
+def _(ThreadPoolExecutor, hash_password, os, timed):
+    _passwords = [os.urandom(10) for _ in range(1_000)]
 
-    _start = time.perf_counter()
-    for _p in _passwords:
-        hash_password(_p)
-    _sequential = time.perf_counter() - _start
+    with timed("1 thread"):
+        [hash_password(password) for password in _passwords]
 
-    with ThreadPoolExecutor() as _pool:
-        _start = time.perf_counter()
+    with ThreadPoolExecutor() as _pool, timed("thread pool"):
         list(_pool.map(hash_password, _passwords))
-        _threaded = time.perf_counter() - _start
-
-    _matrix = np.arange(100_000_000).reshape(50, -1)  # ~800 MB of int64; lower it if you're short on RAM
-    _start = time.perf_counter()
-    np.mean(_matrix, axis=1)
-    _np_single = time.perf_counter() - _start
-    with ThreadPoolExecutor() as _pool:
-        _start = time.perf_counter()
-        list(_pool.map(np.mean, _matrix))  # one row per task
-        _np_threads = time.perf_counter() - _start
-
-    print(f"scrypt x 2,000:    1 thread {_sequential:.2f} s, thread pool {_threaded:.2f} s")
-    print(f"numpy row means:   1 thread {_np_single:.3f} s, thread pool {_np_threads:.3f} s")
     return
 
 

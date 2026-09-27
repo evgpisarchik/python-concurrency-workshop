@@ -17,16 +17,19 @@ def fib_in_threads(threads: int) -> float:
 
 
 class Counter:
-    value = 0
+    def __init__(self):
+        self.value = 0
+
+    def increment(self):
+        self.value += 1  # read, add, write: another thread can write in between
 
 
-def lost_updates() -> int:
-    """4 threads do `counter.value += 1` 200,000 times each, without a lock. Returns how many increments got lost."""
-    counter = Counter()
+def lost_updates(counter: Counter) -> int:
+    """4 threads call `counter.increment()` 200,000 times each. Returns how many increments got lost."""
 
     def work():
         for _ in range(200_000):
-            counter.value += 1  # read, add, write: another thread can write in between
+            counter.increment()
 
     threads = [threading.Thread(target=work) for _ in range(4)]
     for t in threads:
@@ -40,4 +43,4 @@ if __name__ == "__main__":
     print(f"GIL enabled: {sys._is_gil_enabled()}")
     print(f"1 thread:  {fib_in_threads(1):.2f} s")
     print(f"4 threads: {fib_in_threads(4):.2f} s")
-    print(f"lost updates: {lost_updates():,} of 800,000")
+    print(f"lost updates: {lost_updates(Counter()):,} of 800,000")
